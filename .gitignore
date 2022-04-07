@@ -33,3 +33,4 @@ dist/
 
 admission/
 parsed_admission/
+.DS_Store
