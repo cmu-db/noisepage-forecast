@@ -30,3 +30,6 @@ dist/
 *.egg
 
 *.so
+
+admission/
+parsed_admission/
