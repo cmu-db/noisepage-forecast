@@ -5,7 +5,9 @@ import pandas as pd
 import pglast
 from dask.diagnostics import ProgressBar
 
-from constants import DEBUG_POSTGRESQL_CSV, PG_LOG_DTYPES
+import csv
+
+from constants import DEBUG_POSTGRESQL_CSV, DEBUG_POSTGRESQL_CSV_PARSED, PG_LOG_DTYPES
 
 
 def read_postgresql_csv_to_df(postgresql_csv):
@@ -44,18 +46,11 @@ def read_postgresql_csv_to_df(postgresql_csv):
     df["query_raw"] = query
     df["params"] = df["detail"].apply(_extract_params, meta=("params", object))
 
-    df["query_subst"] = df[["query_raw", "params"]].apply(
-        _substitute, axis=1, meta=("query_subst", str)
-    )
+    df["query_subst"] = df[["query_raw", "params"]].apply(_substitute, axis=1, meta=("query_subst", str))
     df = df.drop(columns=["query_raw", "params"])
 
-    template_param = df["query_subst"].apply(
-        _parse, meta=("template_param_tuple", object)
-    )
-    df = df.assign(
-        query_template=template_param.map(lambda x: x[0]),
-        query_params=template_param.map(lambda x: x[1]),
-    )
+    template_param = df["query_subst"].apply(_parse, meta=("template_param_tuple", object))
+    df = df.assign(query_template=template_param.map(lambda x: x[0]), query_params=template_param.map(lambda x: x[1]),)
 
     stored_columns = {
         "log_time",
@@ -142,7 +137,9 @@ def main():
     pbar = ProgressBar()
     pbar.register()
     df = read_postgresql_csv_to_df(DEBUG_POSTGRESQL_CSV)
-    breakpoint()
+    df.to_csv(
+        DEBUG_POSTGRESQL_CSV_PARSED, single_file=True, quoting=csv.QUOTE_ALL,
+    )
 
 
 if __name__ == "__main__":

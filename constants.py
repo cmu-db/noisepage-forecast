@@ -1,6 +1,10 @@
-DEBUG_MYSQL_LOG = "/home/cmu-db-nuc-wan/admissions/magneto.log.2016-09-04"
-DEBUG_MYSQL_CSV = "/tmp/meowmeow.csv"
-DEBUG_POSTGRESQL_CSV = "/tmp/meowmeow2.csv"
+DEBUG_MYSQL_LOG = "./admission/magneto.*"
+# DEBUG_MYSQL_CSV = "/Users/jackiedong/Documents/CMU/2022-spring/15799/admission_data/magneto.log.2017-07-02-anon.csv"
+DEBUG_POSTGRESQL_CSV = "./admission/mysql_to_postgres_raw.csv"
+DEBUG_POSTGRESQL_CSV_PARSED = "./parsed_admission/postgres_parsed.csv"
+CLUSTER_ASSIGNMENT_CSV = "./parsed_admission/cluster_assignment.csv"
+QUERY_TIMESERIES_CSV = "./parsed_admission/query_timeseries.csv"
+CLUSTER_TIMESERIES_CSV = "./parsed_admission/cluster_timeseries.csv"
 
 PG_LOG_DTYPES = {
     "log_time": str,
@@ -30,3 +34,4 @@ PG_LOG_DTYPES = {
     "leader_pid": "Int64",
     "query_id": "Int64",
 }
+
