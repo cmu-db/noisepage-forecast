@@ -155,9 +155,10 @@ class Forecaster:
             self.load_forecast_metadata()
 
     def _generate_param_X_Y_dict(self):
-        """qt_to_param_X: 
-        key = query template
-        value = [param1_quantile_df, param2_quantile_df, ...]
+        """
+        qt_to_param_X:
+            key = query template
+            value = [param1_quantile_df, param2_quantile_df, ...]
         """
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -518,8 +519,10 @@ class Forecaster:
         template_normalized_df = self.data_preprocessor.qt_to_normalized_df[query_template]
         template_dtypes = self.data_preprocessor.qt_to_dtype[query_template]
         template_stats = self.data_preprocessor.qt_to_stats[query_template]
+
         template_index = self.qt_to_index[query_template]
         param_X = self.qt_to_param_X[query_template]
+
         num_params = len(template_dtypes)
 
         generated_params = []
@@ -545,6 +548,7 @@ class Forecaster:
             seq = seq[None, :, :]
             seq = np.transpose(seq, (1, 0, 2))
             seq = torch.tensor(seq).to(device).float()
+            # TODO: should obtain the hidden states and continuously feed the hidden state into the model
             for j in tqdm(range(num_predictions)):
                 # Get predicted quantiles from the model
                 with torch.no_grad():

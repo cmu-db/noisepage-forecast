@@ -174,7 +174,7 @@ if __name__ == "__main__":
 
     # Load the class
     with open("./data/data_preprocessor.pickle", "rb") as f:
-        dp2 = pickle.load(f)
-        # dp2.graph_query_template(0)
-    qts = list(dp2.qt_to_original_df.keys())
+        dp = pickle.load(f)
+        dp.graph_query_template(0)
+    qts = list(dp.qt_to_original_df.keys())
     print("query template:", qts[0])
