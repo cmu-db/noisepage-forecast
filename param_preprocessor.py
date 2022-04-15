@@ -13,47 +13,11 @@ from tqdm import tqdm
 import warnings
 import pickle
 
-QUERY_LOG_FILENAME = "./preprocessed.parquet.gzip"
-
-
-class QuantileMetadata:
-    @classmethod
-    def left_boundary(x):
-        return x.quantile(0.01)
-
-    def q1(x):
-        return x.quantile(0.1)
-
-    def q2(x):
-        return x.quantile(0.2)
-
-    def q3(x):
-        return x.quantile(0.3)
-
-    def q4(x):
-        return x.quantile(0.4)
-
-    def q5(x):
-        return x.quantile(0.5)
-
-    def q6(x):
-        return x.quantile(0.6)
-
-    def q7(x):
-        return x.quantile(0.7)
-
-    def q8(x):
-        return x.quantile(0.8)
-
-    def q9(x):
-        return x.quantile(0.9)
-
-    def right_boundary(x):
-        return x.quantile(0.99)
-
 
 class DataPreprocessor:
-    def __init__(self, pred_interval=pd.Timedelta("2S"), pred_seq_len=5, pred_horizon=pd.Timedelta("2S")):
+    def __init__(
+        self, pred_interval=pd.Timedelta("2S"), pred_seq_len=5, pred_horizon=pd.Timedelta("2S"),
+    ):
         # {key=template, value=params_dataframe}
         self.qt_to_original_df = {}
         # {key=template, value=params_dataframe}
@@ -62,22 +26,6 @@ class DataPreprocessor:
         self.qt_to_dtype = {}
         # {key=template, value=[(p1_mean, p1_var), (p2_mean, p2_var), ...]}
         self.qt_to_stats = {}
-
-        # Quantiles to be used to generate training data
-        self.quantiles = [
-            QuantileMetadata.left_boundary,
-            QuantileMetadata.q1,
-            QuantileMetadata.q2,
-            QuantileMetadata.q3,
-            QuantileMetadata.q4,
-            QuantileMetadata.q5,
-            QuantileMetadata.q6,
-            QuantileMetadata.q7,
-            QuantileMetadata.q8,
-            QuantileMetadata.q9,
-            QuantileMetadata.right_boundary,
-        ]
-        self.quantile_names = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 
         # Prediction interval hyperparameters
         self.prediction_interval = pred_interval  # Each interval has two seconds
@@ -182,63 +130,35 @@ class DataPreprocessor:
                 except:
                     pass
 
-    def generate_training_data(self):
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            # X has shape (N, seq_len, num_quantiles) --> each training instance has shape (seq_len, num_quantiles)
-            # Y has shape (N, num_quantiles)
-            query_to_param_X = {}
-            query_to_param_Y = {}
-            for qt, tdfp in tqdm(self.qt_to_normalized_df.items()):
-                param_X = []
-                param_Y = []
+    def _clear_cache(self):
+        self.qt_to_original_df = {}
+        self.qt_to_normalized_df = {}
+        self.qt_to_dtype = {}
+        self.qt_to_stats = {}
 
-                dtypes = self.qt_to_dtype[qt]
-                for j, col in enumerate(tdfp):
-                    # Skip non-numerical columns
-                    if dtypes[j] == "string":
-                        param_X.append(None)
-                        param_Y.append(None)
-                        continue
+    def preprocess(self, log_filename, file_type, dataframe=None):
+        self._clear_cache()
 
-                    param_col_X = []
-                    param_col_Y = []
-                    # Group by time and get quantile data
-                    time_series_df = tdfp[col].resample(self.prediction_interval).agg(self.quantiles)
-                    time_series_df = time_series_df.astype(float)
-                    # display(time_series_df.head())
-                    shifted = time_series_df.shift(freq=-self.prediction_horizon).reindex_like(time_series_df).ffill()
+        if file_type not in ["parquet", "csv", "dataframe"]:
+            raise "File type must be parquet, csv, or pandas dataframe"
+        if file_type == "parquet":
+            # Get parsed query log
+            preprocessor = Preprocessor(parquet_path=log_filename)
+            df = preprocessor.get_dataframe()
+            empties = df["query_template"] == ""
+            print(f"Removing {sum(empties)} empty query template values.")
+            df = df[:][~empties]
+        elif file_type == "csv":
+            # Get parsed query log
+            preprocessor = Preprocessor(csvlogs=log_filename)
+            df = preprocessor.get_dataframe()
+            empties = df["query_template"] == ""
+            print(f"Removing {sum(empties)} empty query template values.")
+            df = df[:][~empties]
+        elif file_type == "df":
+            df = dataframe
 
-                    # Generate training instance. Add padding if neccesary
-                    for i in range(len(time_series_df) - 1):
-                        if i + 1 >= self.prediction_seq_len:
-                            i_start = i - self.prediction_seq_len + 1
-                            param_col_X.append(time_series_df.iloc[i_start : (i + 1), :].to_numpy())
-                            param_col_Y.append(shifted.iloc[i, :].to_numpy())
-                        else:
-                            x = time_series_df.iloc[: (i + 1), :].to_numpy()
-                            # Add padding above the rows
-                            x = np.pad(x, ((self.prediction_seq_len - i - 1, 0), (0, 0)))
-                            param_col_X.append(x)
-                            param_col_Y.append(shifted.iloc[i, :].to_numpy())
-                    param_col_X, param_col_Y = np.asarray(param_col_X), np.asarray(param_col_Y)
-                    param_X.append(param_col_X)
-                    param_Y.append(param_col_Y)
-
-                query_to_param_X[qt] = param_X
-                query_to_param_Y[qt] = param_Y
-            self.qt_to_param_X = query_to_param_X
-            self.qt_to_param_Y = query_to_param_Y
-
-    def preprocess(self):
-        # Get parsed query log
-        preprocessor = Preprocessor(parquet_path=QUERY_LOG_FILENAME)
-        df = preprocessor.get_dataframe()
-        empties = df["query_template"] == ""
-        print(f"Removing {sum(empties)} empty query template values.")
-        df = df[:][~empties]
         self._get_param_data(df)
-        self.generate_training_data()
 
     def save_to_file(self, file_path):
         if self.save_to_file:
@@ -247,16 +167,14 @@ class DataPreprocessor:
 
 
 if __name__ == "__main__":
+    # query_log_filename = "./preprocessed.parquet.gzip"
     # dp = DataPreprocessor()
-    # dp.preprocess()
+    # dp.preprocess(query_log_filename, "parquet")
     # dp.save_to_file("./data/data_preprocessor.pickle")
 
     # Load the class
     with open("./data/data_preprocessor.pickle", "rb") as f:
         dp2 = pickle.load(f)
         # dp2.graph_query_template(0)
-    qts = list(dp2.qt_to_param_X.keys())
+    qts = list(dp2.qt_to_original_df.keys())
     print("query template:", qts[0])
-    print("number of params:", len(dp2.qt_to_param_X[qts[0]]))
-    print("training data shape for param 1:", dp2.qt_to_param_X[qts[0]][0].shape, dp2.qt_to_param_Y[qts[0]][0].shape)
-
