@@ -191,12 +191,6 @@ class Forecaster:
                         param_Y.append(None)
                         continue
 
-                    param_col_X = []
-                    param_col_Y = []
-
-                    param_col_X_new = []
-                    param_col_Y_new = []
-
                     # Group by time and get quantile data
                     time_series_df = template_df[col].resample(self.prediction_interval).agg(self.quantiles)
 
@@ -209,27 +203,18 @@ class Forecaster:
 
                     time_series_df = time_series_df.astype(float)
 
-                    # display(time_series_df.head())
-                    shifted = time_series_df.shift(freq=-self.prediction_horizon).reindex_like(time_series_df).ffill()
+                    # note: num_samples indicates the number of non-overlapping training samples
+                    # note: [t : t + seq_len] -> [t + seq_len : t + 2seq_len]
+                    num_samples = (len(time_series_df) - 1) // self.prediction_seq_len
+                    time_series_np = time_series_df.to_numpy()
 
-                    # Generate training instance. Add padding if neccesary
-                    for i in range(len(time_series_df) - 1):
-                        if i + 1 >= self.prediction_seq_len:
-                            i_start = i - self.prediction_seq_len + 1
-                            param_col_X.append(time_series_df.iloc[i_start: (i + 1), :].to_numpy())
-                            param_col_Y.append(shifted.iloc[i, :].to_numpy())
-                        else:
-                            x = time_series_df.iloc[i, :].to_numpy()
-                            # Add padding above the rows
-                            x = np.pad(x, ((self.prediction_seq_len - i - 1, 0), (0, 0)))
-                            param_col_X.append(x)
-                            param_col_Y.append(shifted.iloc[i, :].to_numpy())
+                    param_col_X_new = np.split(time_series_np[:num_samples * self.prediction_seq_len, :], num_samples)
+                    param_col_Y_new = np.split(time_series_np[1:num_samples * self.prediction_seq_len + 1, :], num_samples)
 
-                    num_samples = (len(time_series_df) - 1) // self.predseql
+                    param_col_X_new, param_col_Y_new = np.asarray(param_col_X_new), np.asarray(param_col_Y_new)
 
-                    param_col_X, param_col_Y = np.asarray(param_col_X), np.asarray(param_col_Y)
-                    param_X.append(param_col_X)
-                    param_Y.append(param_col_Y)
+                    param_X.append(param_col_X_new)
+                    param_Y.append(param_col_Y_new)
 
                 query_to_param_X[query_template] = param_X
                 query_to_param_Y[query_template] = param_Y
