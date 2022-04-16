@@ -548,14 +548,14 @@ class Forecaster:
                 with torch.no_grad():
                     pred = model(seq)
 
-            # Ensure prediction quantile values are strictly increasing
-            pred = pred[-1, -1, :]
-            pred = torch.cummax(pred, dim=0).values
+                # Ensure prediction quantile values are strictly increasing
+                pred = pred[-1, -1, :]
+                pred = torch.cummax(pred, dim=0).values
 
-            # Add pred to original seq to create new seq for next time stamp
-            seq = torch.squeeze(seq, axis=1)
-            seq = torch.cat((seq[1:, :], pred[None, :]), axis=0)
-            seq = seq[:, None, :]
+                # Add pred to original seq to create new seq for next time stamp
+                seq = torch.squeeze(seq, axis=1)
+                seq = torch.cat((seq[1:, :], pred[None, :]), axis=0)
+                seq = seq[:, None, :]
 
             pred = pred.cpu().detach().numpy()
 
