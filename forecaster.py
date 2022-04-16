@@ -163,21 +163,32 @@ class Forecaster:
 
     def _generate_param_X_Y_dict(self):
         """
-        qt_to_param_X:
-            key = query template
-            value = [param1_quantile_df, param2_quantile_df, ...]
+        Split the normalized query template dataframe into matrices that can be fed into the LSTM.
+        In the end, the query_to_param_X and query_to_param_Y dictionaries are constructed.
+        The description of the dictionaries can be found below.
+
+        Note that this is different from the original way of partitioning the datapoints.
+        Specifically, X and Y have the same shape for a template's parameter. Y is simply shifted one step forward.
+        X is also non-overlapping (i.e. 1st point: [t : t + seq_len], 2nd point [t + seq_len : t + 2seq_len]).
+        There is no point to feed the LSTM with data points it has seen before.
         """
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            # X has shape (N, seq_len, num_quantiles) --> each training instance
-            # has shape (seq_len, num_quantiles)
-            # Y has shape (N, num_quantiles)
+
+            # note: the dictionaries map a query template to X, data to be fed into the LSTM
+            # note: and Y, the ground truth for the prediction
+            # note: X and Y are both lists of matrices, the length of the lists are the number of parameters
+            # note: X and Y both have shape (N, seq_len, num_quantiles + n)
+            # note: where N is the number of samples, seq_len is the number of data points fed into the LSTM
+            # note: at a time, num_quantiles is the number of quantiles defining the distribution,
+            # note: and n is the number of parameters for the parameter
             query_to_param_X = {}
             query_to_param_Y = {}
 
             # note: each template_df is in the shape of (T, N)
             # note: where T is the number of timestamps and N is the number of parameters
             for query_template, template_df in tqdm(self.data_preprocessor.qt_to_normalized_df.items()):
+                # list of matrices for a given query_template
                 param_X = []
                 param_Y = []
 
@@ -393,7 +404,7 @@ class Forecaster:
 
     def fit(self, log_filename, file_type="parquet", dataframe=None, save_metadata=True):
         print("Preprocessing data...")
-        self.data_preprocessor.preprocess(log_filename, file_type, dataframe)
+        # self.data_preprocessor.preprocess(log_filename, file_type, dataframe)
         print("Preprocessing Done!")
         if save_metadata:
             self.data_preprocessor.save_to_file(PREPROCESSOR_SAVE_PATH)
@@ -621,7 +632,7 @@ if __name__ == "__main__":
     query_log_filename = "./preprocessed.parquet.gzip"
 
     forecaster = Forecaster(
-        pred_interval=pd.Timedelta("2S"), pred_seq_len=5, pred_horizon=pd.Timedelta("2S"), load_metadata=False
+        pred_interval=pd.Timedelta("2S"), pred_seq_len=5, pred_horizon=pd.Timedelta("2S"), load_metadata=True
     )
     forecaster.fit(query_log_filename)
 
