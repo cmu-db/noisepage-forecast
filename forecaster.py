@@ -554,7 +554,7 @@ class Forecaster:
 
             # Add pred to original seq to create new seq for next time stamp
             seq = torch.squeeze(seq, axis=1)
-            seq = torch.cat((seq[:-1, :], pred[None, :]), axis=0)
+            seq = torch.cat((seq[1:, :], pred[None, :]), axis=0)
             seq = seq[:, None, :]
 
             pred = pred.cpu().detach().numpy()
