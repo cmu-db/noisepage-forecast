@@ -6,13 +6,10 @@ import pandas as pd
 from scipy import stats
 import joypy
 import matplotlib.pyplot as plt
-
 import pickle
 import os
 import warnings
-
 from param_preprocessor import DataPreprocessor
-
 from sklearn.model_selection import train_test_split
 
 # LSTM config
@@ -20,6 +17,7 @@ HIDDEN_SIZE = 128
 RNN_LAYERS = 2
 EPOCHS = 50
 LR = 0.0001
+
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Constants
@@ -32,7 +30,6 @@ qt_to_index_SAVE_PATH = "./data/qt_to_index.pickle"
 
 
 class QuantileMetadata:
-    @classmethod
     def left_boundary(x):
         return x.quantile(0.01)
 
@@ -115,8 +112,8 @@ class Network(nn.Module):
 
 class Forecaster:
     def __init__(
-        self, pred_interval=pd.Timedelta("2S"), pred_seq_len=5, pred_horizon=pd.Timedelta("2S"), load_metadata=False
-    ):
+            self, pred_interval=pd.Timedelta("2S"), pred_seq_len=5, pred_horizon=pd.Timedelta("2S"),
+            load_metadata=False):
         """
         Initialize Forecaster class.
 
@@ -147,7 +144,7 @@ class Forecaster:
             with open(PREPROCESSOR_SAVE_PATH, "rb") as f:
                 self.data_preprocessor = pickle.load(f)
         else:
-            self.data_preprocessor = DataPreprocessor(pred_interval, pred_seq_len, pred_horizon,)
+            self.data_preprocessor = DataPreprocessor(pred_interval, pred_seq_len, pred_horizon)
 
         # note: if the data is loaded from the pickle, the parameters should match
 
@@ -177,12 +174,17 @@ class Forecaster:
             # Y has shape (N, num_quantiles)
             query_to_param_X = {}
             query_to_param_Y = {}
-            for query_template, tdfp in tqdm(self.data_preprocessor.qt_to_normalized_df.items()):
+
+            # note: each template_df is in the shape of (T, N)
+            # note: where T is the number of timestamps and N is the number of parameters
+            for query_template, template_df in tqdm(self.data_preprocessor.qt_to_normalized_df.items()):
                 param_X = []
                 param_Y = []
 
                 dtypes = self.data_preprocessor.qt_to_dtype[query_template]
-                for j, col in enumerate(tdfp):
+                num_cols = len(template_df.columns)
+
+                for j, col in enumerate(template_df):
                     # Skip non-numerical columns
                     if dtypes[j] == "string":
                         param_X.append(None)
@@ -191,9 +193,22 @@ class Forecaster:
 
                     param_col_X = []
                     param_col_Y = []
+
+                    param_col_X_new = []
+                    param_col_Y_new = []
+
                     # Group by time and get quantile data
-                    time_series_df = tdfp[col].resample(self.prediction_interval).agg(self.quantiles)
+                    time_series_df = template_df[col].resample(self.prediction_interval).agg(self.quantiles)
+
+                    # note: add N columns to indicate which parameter current time series represents
+                    for param_index in range(num_cols):
+                        if param_index == j:
+                            time_series_df[f"p{param_index}"] = 1
+                        else:
+                            time_series_df[f"p{param_index}"] = 0
+
                     time_series_df = time_series_df.astype(float)
+
                     # display(time_series_df.head())
                     shifted = time_series_df.shift(freq=-self.prediction_horizon).reindex_like(time_series_df).ffill()
 
@@ -201,14 +216,17 @@ class Forecaster:
                     for i in range(len(time_series_df) - 1):
                         if i + 1 >= self.prediction_seq_len:
                             i_start = i - self.prediction_seq_len + 1
-                            param_col_X.append(time_series_df.iloc[i_start : (i + 1), :].to_numpy())
+                            param_col_X.append(time_series_df.iloc[i_start: (i + 1), :].to_numpy())
                             param_col_Y.append(shifted.iloc[i, :].to_numpy())
                         else:
-                            x = time_series_df.iloc[: (i + 1), :].to_numpy()
+                            x = time_series_df.iloc[i, :].to_numpy()
                             # Add padding above the rows
                             x = np.pad(x, ((self.prediction_seq_len - i - 1, 0), (0, 0)))
                             param_col_X.append(x)
                             param_col_Y.append(shifted.iloc[i, :].to_numpy())
+
+                    num_samples = (len(time_series_df) - 1) // self.predseql
+
                     param_col_X, param_col_Y = np.asarray(param_col_X), np.asarray(param_col_Y)
                     param_X.append(param_col_X)
                     param_Y.append(param_col_Y)
@@ -262,7 +280,7 @@ class Forecaster:
         #     .X_train.shape
         # )
 
-    def save_checkpoint(ckpt_path, filename, query_template, model, epoch, optimizer, scheduler):
+    def save_checkpoint(self, ckpt_path, filename, query_template, model, epoch, optimizer=None, scheduler=None):
         path = os.path.join(ckpt_path, f"{filename}")
 
         if not os.path.exists(ckpt_path):
@@ -321,7 +339,7 @@ class Forecaster:
         train_loss = 0
         batch_bar = tqdm(total=X_train.shape[1], dynamic_ncols=True, leave=False, position=0, desc="Train")
         for ind in arr:
-            seq = torch.tensor(X_train[:, ind : ind + 1, :]).to(device).float()
+            seq = torch.tensor(X_train[:, ind: ind + 1, :]).to(device).float()
             labels = torch.tensor(Y_train[ind]).to(device).float()
             optimizer.zero_grad()
             y_pred = model(seq)
@@ -348,7 +366,7 @@ class Forecaster:
         val_loss = 0
         batch_bar = tqdm(total=X_test.shape[1], dynamic_ncols=True, leave=False, position=0, desc="Validate")
         for ind in range(X_test.shape[1]):
-            seq = torch.tensor(X_test[:, ind : ind + 1, :]).to(device).float()
+            seq = torch.tensor(X_test[:, ind: ind + 1, :]).to(device).float()
             labels = torch.tensor(Y_test[ind]).to(device).float()
 
             with torch.no_grad():
@@ -386,7 +404,7 @@ class Forecaster:
 
                 # print(f"[LSTM FIT]epoch: {epoch + 1:3}, train_loss: {train_loss:10.8f}, val_loss: {val_loss:10.8f}")
                 filename = f"{template_index}_{param_index}"
-                self.save_checkpoint(MODEL_SAVE_PATH, filename, qt, model, epoch, None, None)
+                self.save_checkpoint(MODEL_SAVE_PATH, filename, qt, model, epoch)
 
     def fit(self, log_filename, file_type="parquet", dataframe=None, save_metadata=True):
         print("Preprocessing data...")
@@ -399,10 +417,10 @@ class Forecaster:
         self.generate_time_series_data()
         print("Data generation done!")
 
+        self._train_model()
+
         if save_metadata:
             self.export_forecast_metadata()
-
-        # self._train_model()
 
     # Get all parameters for a query and compare it with actual data
     def get_all_parameters_for(self, query_template: str):
@@ -440,7 +458,7 @@ class Forecaster:
                 # Generate sequence data. Add padding if neccesary
                 if j + 1 >= self.prediction_seq_len:
                     start_time = j - self.prediction_seq_len + 1
-                    seq = time_series_df.iloc[start_time : (j + 1), :].to_numpy()
+                    seq = time_series_df.iloc[start_time: (j + 1), :].to_numpy()
                 else:
                     seq = time_series_df.iloc[: (j + 1), :].to_numpy()
                     seq = np.pad(seq, ((self.prediction_seq_len - j - 1, 0), (0, 0)))
@@ -501,7 +519,7 @@ class Forecaster:
                 min_val = min_val - (1 + 0.2 * (max_val - min_val))
                 max_val = max_val + (1 + 0.2 * (max_val - min_val))
 
-                print(f"PARAM ${i+1} Predicted")
+                print(f"PARAM ${i + 1} Predicted")
                 fig, axes = joypy.joyplot(
                     predicted_params_df.groupby(pd.Grouper(freq="5s")),
                     hist=True,
@@ -512,7 +530,7 @@ class Forecaster:
                 )
                 plt.show()
 
-                print(f"PARAM ${i+1} Actual")
+                print(f"PARAM ${i + 1} Actual")
                 fig, axes2 = joypy.joyplot(
                     template_original_df[col].to_frame().groupby(pd.Grouper(freq="5s")),
                     hist=True,
@@ -527,7 +545,6 @@ class Forecaster:
     # Get all parameters for a query and compare it with actual data
     def get_parameters_for(self, query_template, timestamp, num_queries):
         target_timestamp = pd.Timestamp(timestamp)
-
         template_normalized_df = self.data_preprocessor.qt_to_normalized_df[query_template]
         template_dtypes = self.data_preprocessor.qt_to_dtype[query_template]
         template_stats = self.data_preprocessor.qt_to_stats[query_template]
@@ -546,7 +563,7 @@ class Forecaster:
 
             # Get corresponding model
             model = Network(len(self.quantiles), len(self.quantiles), HIDDEN_SIZE, RNN_LAYERS)
-            filepath = os.path.join("./models/v1", f"{template_index}_{i}")
+            filepath = os.path.join(MODEL_SAVE_PATH, f"{template_index}_{i}")
             state_dict = torch.load(filepath)
             model.load_state_dict(state_dict["model_state"])
 
@@ -577,42 +594,41 @@ class Forecaster:
             seq = torch.cat((seq[:-1, :], pred[None, :]), axis=0)
             seq = seq[:, None, :]
 
-        pred = pred.cpu().detach().numpy()
+            pred = pred.cpu().detach().numpy()
 
-        # Un-normalize the quantiles
-        mean, std = template_stats[i]
-        if std != 0:
-            pred = pred * std + mean
-        else:
-            pred = pred + mean
+            # Un-normalize the quantiles
+            mean, std = template_stats[i]
+            if std != 0:
+                pred = pred * std + mean
+            else:
+                pred = pred + mean
 
-        # Draw samples from the predicted distribution
-        class Dist(stats.rv_continuous):
-            def _cdf(self, x):
-                # note how is this conditions used
-                conditions = [x <= pred[0]]
-                for k in range(pred.shape[0] - 1):
-                    conditions.append(pred[k] <= x <= pred[k + 1])
-                choices = [quantile_name / 100 for quantile_name in self.quantile_names]
-                return np.select(conditions, choices, default=0)
+            # Draw samples from the predicted distribution
 
-        dist = Dist(a=pred[0], b=pred[-1], name="deterministic")
-        # Model takes in sequence data until time j and ouputs prediction value for time j+1.
-        # Therefore we need the number of queries in thej+1's interval
-        # num_templates = int(num_template_df[j+1]/10) # Divide by 10 so it runs faster
-        # num_params = 30 # Generate 30 parameter values for this specific parameter
+            class Dist(stats.rv_continuous):
+                def _cdf(self_dist, x):  # Rename self to self_dist so that self refers to outer class
+                    conditions = [x <= pred[0]]
+                    for k in range(pred.shape[0] - 1):
+                        conditions.append(pred[k] <= x <= pred[k + 1])
+                    choices = [quantile_name / 100 for quantile_name in self.quantile_names]
+                    return np.select(conditions, choices, default=0)
 
-        generated_param_ith = []
-        try:
-            for _ in range(num_queries):
-                generated_param_ith.append(dist.rvs())
-        except:
-            # If all predicted quantiles have the same value, then a continous cdf cannot be constructed.
-            # Just take any predicted quantile value as the prediction.
-            for _ in range(num_queries):
-                generated_param_ith.append(pred[0])
+            dist = Dist(a=pred[0], b=pred[-1], name="deterministic")
+            # Model takes in sequence data until time j and ouputs prediction value for time j+1.
+            # Therefore we need the number of queries in thej+1's interval
+            # num_templates = int(num_template_df[j+1]/10) # Divide by 10 so it runs faster
+            # num_params = 30 # Generate 30 parameter values for this specific parameter
+            generated_param_ith = []
+            try:
+                for _ in range(num_queries):
+                    generated_param_ith.append(dist.rvs())
+            except:
+                # If all predicted quantiles have the same value, then a continous cdf cannot be constructed.
+                # Just take any predicted quantile value as the prediction.
+                for _ in range(num_queries):
+                    generated_param_ith.append(pred[0])
 
-        generated_params.append(generated_param_ith)
+            generated_params.append(generated_param_ith)
         return generated_params
 
 
@@ -620,7 +636,16 @@ if __name__ == "__main__":
     query_log_filename = "./preprocessed.parquet.gzip"
 
     forecaster = Forecaster(
-        pred_interval=pd.Timedelta("2S"), pred_seq_len=5, pred_horizon=pd.Timedelta("2S"), load_metadata=False,
+        pred_interval=pd.Timedelta("2S"), pred_seq_len=5, pred_horizon=pd.Timedelta("2S"), load_metadata=False
     )
     forecaster.fit(query_log_filename)
 
+    forecaster = Forecaster(
+        pred_interval=pd.Timedelta("2S"), pred_seq_len=5, pred_horizon=pd.Timedelta("2S"), load_metadata=True
+    )
+    pred_result = forecaster.get_parameters_for(
+        "DELETE FROM new_order WHERE NO_O_ID = $1 AND NO_D_ID = $2 AND NO_W_ID = $3",
+        "2022-03-08 11:30:06.021000-0500",
+        10,
+    )
+    print(pred_result)
