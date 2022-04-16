@@ -94,7 +94,8 @@ class Network(nn.Module):
         super(Network, self).__init__()
 
         self.lstm = nn.LSTM(
-            input_size=input_size, hidden_size=hidden_size, num_layers=num_layers, bidirectional=False, dropout=0.1
+            input_size=input_size, hidden_size=hidden_size, num_layers=num_layers, bidirectional=False, dropout=0.1,
+            batch_first=True
         )
         self.classification = nn.Sequential(
             nn.Linear(in_features=hidden_size, out_features=64),
@@ -102,12 +103,15 @@ class Network(nn.Module):
             nn.Linear(in_features=64, out_features=output_size),
         )
 
-    def forward(self, x):
-        output, (h_n, c_n) = self.lstm(x)
+    def forward(self, x, hidden):
         # output: (L, 1, 1 * H_out)
 
-        out = self.classification(output)
-        return out
+        if hidden is None:
+            output, hidden = self.lstm(x)
+        else:
+            output, hidden = self.lstm(x, hidden)
+        prediction = self.classification(output)
+        return prediction, hidden
 
 
 class Forecaster:
@@ -161,13 +165,14 @@ class Forecaster:
         if load_metadata:
             self.load_forecast_metadata()
 
-    def _generate_param_X_Y_dict(self):
+    def generate_time_series_data(self):
         """
         Split the normalized query template dataframe into matrices that can be fed into the LSTM.
         In the end, the query_to_param_X and query_to_param_Y dictionaries are constructed.
         The description of the dictionaries can be found below.
+        The training and testing data are also generated here.
 
-        Note that this is different from the original way of partitioning the datapoints.
+        Note that this is different from the original way of partitioning the data points.
         Specifically, X and Y have the same shape for a template's parameter. Y is simply shifted one step forward.
         X is also non-overlapping (i.e. 1st point: [t : t + seq_len], 2nd point [t + seq_len : t + 2seq_len]).
         There is no point to feed the LSTM with data points it has seen before.
@@ -195,6 +200,8 @@ class Forecaster:
                 dtypes = self.data_preprocessor.qt_to_dtype[query_template]
                 num_cols = len(template_df.columns)
 
+                param_quantile_timeseries = []
+
                 for j, col in enumerate(template_df):
                     # Skip non-numerical columns
                     if dtypes[j] == "string":
@@ -219,62 +226,31 @@ class Forecaster:
                     num_samples = (len(time_series_df) - 1) // self.prediction_seq_len
                     time_series_np = time_series_df.to_numpy()
 
-                    param_col_X_new = np.split(time_series_np[:num_samples * self.prediction_seq_len, :], num_samples)
-                    param_col_Y_new = np.split(time_series_np[1:num_samples * self.prediction_seq_len + 1, :], num_samples)
+                    param_col_X = np.split(time_series_np[:num_samples * self.prediction_seq_len, :], num_samples)
+                    param_col_Y = np.split(time_series_np[1:num_samples * self.prediction_seq_len + 1, :],
+                                           num_samples)
 
-                    param_col_X_new, param_col_Y_new = np.asarray(param_col_X_new), np.asarray(param_col_Y_new)
+                    param_col_X, param_col_Y = np.asarray(param_col_X), np.asarray(param_col_Y)
 
-                    param_X.append(param_col_X_new)
-                    param_Y.append(param_col_Y_new)
+                    param_X.append(param_col_X)
+                    param_Y.append(param_col_Y)
+
+                    # note: Currently, the entire data set are used to train, this is not the correct way
+                    # note: to do testing. We are doing this for now because we do not have enough data.
+                    _, X_test, _, Y_test = train_test_split(param_col_X, param_col_Y, shuffle=False, test_size=0.1)
+                    X_train = param_col_X
+                    Y_train = param_col_Y
+
+                    param_quantile_timeseries.append(ParamQuantileData(X_train, X_test, Y_train, Y_test))
+
+                self.qt_to_param_quantile_timeseries[query_template] = QueryQuantileData(query_template, param_quantile_timeseries)
 
                 query_to_param_X[query_template] = param_X
                 query_to_param_Y[query_template] = param_Y
+
             self.qt_to_param_X = query_to_param_X
             self.qt_to_param_Y = query_to_param_Y
 
-    def generate_time_series_data(self):
-        """qt_to_param_quantile_timeseries:
-        key = query template
-        value = [(param1_X_train, param1_X_test, param1_Y_train, param1_Y_test), (param2...), ...]
-        """
-        self._generate_param_X_Y_dict()
-        self.qt_to_param_quantile_timeseries = {}
-        for qt in tqdm(self.qt_to_param_X.keys()):
-            param_X = self.qt_to_param_X[qt]
-            param_Y = self.qt_to_param_Y[qt]
-
-            param_quantile_timeseries = []
-            for i in range(len(param_X)):
-                # Skip string parameter
-                if self.data_preprocessor.qt_to_dtype[qt][i] == "string":
-                    param_quantile_timeseries.append(None)
-                    continue
-
-                param_col_X = param_X[i]
-                param_col_Y = param_Y[i]
-
-                # Split into train test set
-                X_train, X_test, Y_train, Y_test = train_test_split(
-                    param_col_X, param_col_Y, shuffle=False, test_size=0.1
-                )
-                # Train on all data. TODO: This is just a hack right now to split
-                # data into two portions. However, we still want to train on
-                # all data.
-                X_train, Y_train = param_col_X, param_col_Y
-
-                # X: (N, L, H_in) to (L, N, H_in);
-                X_train, X_test = np.transpose(X_train, (1, 0, 2)), np.transpose(X_test, (1, 0, 2))
-                # print(X_train.shape, X_test.shape, Y_train.shape, Y_test.shape)
-                param_quantile_timeseries.append(ParamQuantileData(X_train, X_test, Y_train, Y_test))
-
-            self.qt_to_param_quantile_timeseries[qt] = QueryQuantileData(qt, param_quantile_timeseries)
-        # print(
-        #     self.qt_to_param_quantile_timeseries[
-        #         "DELETE FROM new_order WHERE NO_O_ID = $1 AND NO_D_ID = $2 AND NO_W_ID = $3"
-        #     ]
-        #     .param_quantile_data[0]
-        #     .X_train.shape
-        # )
 
     def save_checkpoint(self, ckpt_path, filename, query_template, model, epoch, optimizer=None, scheduler=None):
         path = os.path.join(ckpt_path, f"{filename}")
@@ -389,7 +365,6 @@ class Forecaster:
                 X_train, X_test, Y_train, Y_test = param_quantile_data_obj.get_train_test_data()
 
                 model = Network(len(self.quantiles), len(self.quantiles), HIDDEN_SIZE, RNN_LAYERS).to(device)
-                # note: can probability use all 5 outputs, therefore a different loss function can be used
                 loss_function = nn.MSELoss()
                 optimizer = torch.optim.Adam(model.parameters(), lr=LR)
                 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=(X_train.shape[1] * EPOCHS))
@@ -632,12 +607,12 @@ if __name__ == "__main__":
     query_log_filename = "./preprocessed.parquet.gzip"
 
     forecaster = Forecaster(
-        pred_interval=pd.Timedelta("2S"), pred_seq_len=5, pred_horizon=pd.Timedelta("2S"), load_metadata=True
+        pred_interval=pd.Timedelta("2S"), pred_seq_len=3, pred_horizon=pd.Timedelta("2S"), load_metadata=True
     )
     forecaster.fit(query_log_filename)
 
     forecaster = Forecaster(
-        pred_interval=pd.Timedelta("2S"), pred_seq_len=5, pred_horizon=pd.Timedelta("2S"), load_metadata=True
+        pred_interval=pd.Timedelta("2S"), pred_seq_len=3, pred_horizon=pd.Timedelta("2S"), load_metadata=True
     )
     pred_result = forecaster.get_parameters_for(
         "DELETE FROM new_order WHERE NO_O_ID = $1 AND NO_D_ID = $2 AND NO_W_ID = $3",
