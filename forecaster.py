@@ -180,7 +180,7 @@ class Forecaster:
                     time_series_np = time_series_df.to_numpy()
 
                     param_col_X = np.split(time_series_np[:num_samples * self.prediction_seq_len, :], num_samples)
-                    param_col_Y = np.split(time_series_np[1:num_samples * self.prediction_seq_len + 1, :],
+                    param_col_Y = np.split(time_series_np[1:num_samples * self.prediction_seq_len + 1, :-num_cols],
                                            num_samples)
 
                     param_col_X, param_col_Y = np.asarray(param_col_X), np.asarray(param_col_Y)
@@ -347,10 +347,10 @@ class Forecaster:
         self.generate_time_series_data()
         print("Data generation done!")
 
-        self._train_model()
+        # self._train_model()
 
-        if save_metadata:
-            self.export_forecast_metadata()
+        # if save_metadata:
+        #     self.export_forecast_metadata()
 
     # Get all parameters for a query and compare it with actual data
     def get_all_parameters_for(self, query_template: str):
@@ -479,7 +479,13 @@ class Forecaster:
         template_stats = self.data_preprocessor.qt_to_stats[query_template]
 
         template_index = self.qt_to_index[query_template]
+
         param_X = self.qt_to_param_X[query_template]
+        param_Y = self.qt_to_param_Y[query_template]
+
+        # todo: there is probably a better way to get the shapes
+        _, _, input_size = param_X[0].shape
+        _, _, output_size = param_Y[0].shape
 
         num_params = len(template_dtypes)
 
@@ -491,7 +497,7 @@ class Forecaster:
                 continue
 
             # Get corresponding model
-            model = Network(len(self.quantiles), len(self.quantiles), HIDDEN_SIZE, RNN_LAYERS)
+            model = Network(input_size, output_size, HIDDEN_SIZE, RNN_LAYERS)
             filepath = os.path.join(MODEL_SAVE_PATH, f"{template_index}_{i}")
             state_dict = torch.load(filepath)
             model.load_state_dict(state_dict["model_state"])
@@ -500,28 +506,26 @@ class Forecaster:
             start_timestamp = template_normalized_df.index.max()
             num_predictions = int((target_timestamp - start_timestamp) / self.prediction_interval)
 
-            # Continously make predictions until target_timestamp
+            # Continuously make predictions until target_timestamp
             param_X_col = param_X[i]
-            seq = param_X_col[-1]
-            seq = seq[None, :, :]
-            seq = np.transpose(seq, (1, 0, 2))
+            seq = param_X_col[-1][-1]
+            seq = seq[None, None, :]
             seq = torch.tensor(seq).to(device).float()
-            # TODO: should obtain the hidden states and continuously feed the hidden state into the model
-            for j in tqdm(range(num_predictions)):
+            hidden = None
+            for _ in tqdm(range(num_predictions)):
                 # Get predicted quantiles from the model
                 with torch.no_grad():
-                    pred = model(seq)
+                    seq, hidden = model(seq, hidden)
+                    shape = seq.size()
+                    shape[-1] = num_params
+                    seq = torch.cat((seq, torch.zeros(shape)))
+                    seq[:, :, i] = 1
+
+            # only care about the prediction for the last step
+            pred = seq[-1, -1, :]
 
             # Ensure prediction quantile values are strictly increasing
-            # Todo: if embeddings are changed, this might need to change as well
-            # note: need some clarification on what this is doing
-            pred = pred[-1, -1, :]
             pred = torch.cummax(pred, dim=0).values
-
-            # Add pred to original seq to create new seq for next time stamp
-            seq = torch.squeeze(seq, axis=1)
-            seq = torch.cat((seq[:-1, :], pred[None, :]), axis=0)
-            seq = seq[:, None, :]
 
             pred = pred.cpu().detach().numpy()
 
@@ -533,13 +537,12 @@ class Forecaster:
                 pred = pred + mean
 
             # Draw samples from the predicted distribution
-
             class Dist(stats.rv_continuous):
                 def _cdf(self_dist, x):  # Rename self to self_dist so that self refers to outer class
                     conditions = [x <= pred[0]]
                     for k in range(pred.shape[0] - 1):
                         conditions.append(pred[k] <= x <= pred[k + 1])
-                    # todo: this is a potential source for inconsistency
+                    # todo: this is a potential source for inconsistency if the quantile description changes
                     choices = [quantile_name / 100 for quantile_name in self.quantile_names]
                     return np.select(conditions, choices, default=0)
 
