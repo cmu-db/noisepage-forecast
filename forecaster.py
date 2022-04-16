@@ -32,7 +32,6 @@ qt_to_index_SAVE_PATH = "./data/qt_to_index.pickle"
 
 
 class QuantileMetadata:
-    @classmethod
     def left_boundary(x):
         return x.quantile(0.01)
 
@@ -139,7 +138,7 @@ class Forecaster:
             with open(PREPROCESSOR_SAVE_PATH, "rb") as f:
                 self.data_preprocessor = pickle.load(f)
         else:
-            self.data_preprocessor = DataPreprocessor(pred_interval, pred_seq_len, pred_horizon,)
+            self.data_preprocessor = DataPreprocessor(pred_interval, pred_seq_len, pred_horizon)
 
         # Prediction interval hyperparameters
         self.prediction_interval = pred_interval  # Each interval has two seconds
@@ -251,7 +250,7 @@ class Forecaster:
         #     .X_train.shape
         # )
 
-    def save_checkpoint(ckpt_path, filename, query_template, model, epoch, optimizer, scheduler):
+    def save_checkpoint(self, ckpt_path, filename, query_template, model, epoch, optimizer=None, scheduler=None):
         path = os.path.join(ckpt_path, f"{filename}")
 
         if not os.path.exists(ckpt_path):
@@ -374,7 +373,7 @@ class Forecaster:
 
                 # print(f"[LSTM FIT]epoch: {epoch + 1:3}, train_loss: {train_loss:10.8f}, val_loss: {val_loss:10.8f}")
                 filename = f"{template_index}_{param_index}"
-                self.save_checkpoint(MODEL_SAVE_PATH, filename, qt, model, epoch, None, None)
+                self.save_checkpoint(MODEL_SAVE_PATH, filename, qt, model, epoch)
 
     def fit(self, log_filename, file_type="parquet", dataframe=None, save_metadata=True):
         print("Preprocessing data...")
@@ -387,10 +386,10 @@ class Forecaster:
         self.generate_time_series_data()
         print("Data generation done!")
 
+        self._train_model()
+
         if save_metadata:
             self.export_forecast_metadata()
-
-        # self._train_model()
 
     # Get all parameters for a query and compare it with actual data
     def get_all_parameters_for(self, query_template: str):
@@ -514,7 +513,6 @@ class Forecaster:
     # Get all parameters for a query and compare it with actual data
     def get_parameters_for(self, query_template, timestamp, num_queries):
         target_timestamp = pd.Timestamp(timestamp)
-
         template_normalized_df = self.data_preprocessor.qt_to_normalized_df[query_template]
         template_dtypes = self.data_preprocessor.qt_to_dtype[query_template]
         template_stats = self.data_preprocessor.qt_to_stats[query_template]
@@ -531,7 +529,7 @@ class Forecaster:
 
             # Get corresponding model
             model = Network(len(self.quantiles), len(self.quantiles), HIDDEN_SIZE, RNN_LAYERS)
-            filepath = os.path.join("./models/v1", f"{template_index}_{i}")
+            filepath = os.path.join(MODEL_SAVE_PATH, f"{template_index}_{i}")
             state_dict = torch.load(filepath)
             model.load_state_dict(state_dict["model_state"])
 
@@ -559,49 +557,59 @@ class Forecaster:
             seq = torch.cat((seq[:-1, :], pred[None, :]), axis=0)
             seq = seq[:, None, :]
 
-        pred = pred.cpu().detach().numpy()
+            pred = pred.cpu().detach().numpy()
 
-        # Un-normalize the quantiles
-        mean, std = template_stats[i]
-        if std != 0:
-            pred = pred * std + mean
-        else:
-            pred = pred + mean
+            # Un-normalize the quantiles
+            mean, std = template_stats[i]
+            if std != 0:
+                pred = pred * std + mean
+            else:
+                pred = pred + mean
 
-        # Draw samples from the predicted distribution
-        class Dist(stats.rv_continuous):
-            def _cdf(self, x):
-                conditions = [x <= pred[0]]
-                for k in range(pred.shape[0] - 1):
-                    conditions.append(pred[k] <= x <= pred[k + 1])
-                choices = [quantile_name / 100 for quantile_name in self.quantile_names]
-                return np.select(conditions, choices, default=0)
+            # Draw samples from the predicted distribution
 
-        dist = Dist(a=pred[0], b=pred[-1], name="deterministic")
-        # Model takes in sequence data until time j and ouputs prediction value for time j+1.
-        # Therefore we need the number of queries in thej+1's interval
-        # num_templates = int(num_template_df[j+1]/10) # Divide by 10 so it runs faster
-        # num_params = 30 # Generate 30 parameter values for this specific parameter
+            class Dist(stats.rv_continuous):
+                def _cdf(self_dist, x):  # Rename self to self_dist so that self refers to outer class
+                    conditions = [x <= pred[0]]
+                    for k in range(pred.shape[0] - 1):
+                        conditions.append(pred[k] <= x <= pred[k + 1])
+                    choices = [quantile_name / 100 for quantile_name in self.quantile_names]
+                    return np.select(conditions, choices, default=0)
 
-        generated_param_ith = []
-        try:
-            for _ in range(num_queries):
-                generated_param_ith.append(dist.rvs())
-        except:
-            # If all predicted quantiles have the same value, then a continous cdf cannot be constructed.
-            # Just take any predicted quantile value as the prediction.
-            for _ in range(num_queries):
-                generated_param_ith.append(pred[0])
+            dist = Dist(a=pred[0], b=pred[-1], name="deterministic")
+            # Model takes in sequence data until time j and ouputs prediction value for time j+1.
+            # Therefore we need the number of queries in thej+1's interval
+            # num_templates = int(num_template_df[j+1]/10) # Divide by 10 so it runs faster
+            # num_params = 30 # Generate 30 parameter values for this specific parameter
+            generated_param_ith = []
+            try:
+                for _ in range(num_queries):
+                    generated_param_ith.append(dist.rvs())
+            except:
+                # If all predicted quantiles have the same value, then a continous cdf cannot be constructed.
+                # Just take any predicted quantile value as the prediction.
+                for _ in range(num_queries):
+                    generated_param_ith.append(pred[0])
 
-        generated_params.append(generated_param_ith)
+            generated_params.append(generated_param_ith)
         return generated_params
 
 
 if __name__ == "__main__":
     query_log_filename = "./preprocessed.parquet.gzip"
 
+    # forecaster = Forecaster(
+    #     pred_interval=pd.Timedelta("2S"), pred_seq_len=5, pred_horizon=pd.Timedelta("2S"), load_metadata=False
+    # )
+    # forecaster.fit(query_log_filename)
+
     forecaster = Forecaster(
-        pred_interval=pd.Timedelta("2S"), pred_seq_len=5, pred_horizon=pd.Timedelta("2S"), load_metadata=False,
+        pred_interval=pd.Timedelta("2S"), pred_seq_len=5, pred_horizon=pd.Timedelta("2S"), load_metadata=True
     )
-    forecaster.fit(query_log_filename)
+    pred_result = forecaster.get_parameters_for(
+        "DELETE FROM new_order WHERE NO_O_ID = $1 AND NO_D_ID = $2 AND NO_W_ID = $3",
+        "2022-03-08 11:30:06.021000-0500",
+        10,
+    )
+    print(pred_result)
 
