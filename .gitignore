@@ -40,4 +40,6 @@ parsed_admission/
 models/
 data/
 forecast/
+.vscode/
+environment.yml
 experiment.py
