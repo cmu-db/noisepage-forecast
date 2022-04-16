@@ -38,4 +38,5 @@ parsed_admission/
 *.csv
 
 models/
+data/
 experiment.py
