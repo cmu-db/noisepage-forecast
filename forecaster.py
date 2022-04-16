@@ -16,7 +16,7 @@ from sklearn.model_selection import train_test_split
 HIDDEN_SIZE = 128
 RNN_LAYERS = 2
 EPOCHS = 50
-LR = 0.0001
+LR = 1e-4
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -29,44 +29,11 @@ qt_to_param_quantile_timeseries_SAVE_PATH = "./data/qt_to_param_quantile_timeser
 qt_to_index_SAVE_PATH = "./data/qt_to_index.pickle"
 
 
-class QuantileMetadata:
-    def left_boundary(x):
-        return x.quantile(0.01)
-
-    def q1(x):
-        return x.quantile(0.1)
-
-    def q2(x):
-        return x.quantile(0.2)
-
-    def q3(x):
-        return x.quantile(0.3)
-
-    def q4(x):
-        return x.quantile(0.4)
-
-    def q5(x):
-        return x.quantile(0.5)
-
-    def q6(x):
-        return x.quantile(0.6)
-
-    def q7(x):
-        return x.quantile(0.7)
-
-    def q8(x):
-        return x.quantile(0.8)
-
-    def q9(x):
-        return x.quantile(0.9)
-
-    def right_boundary(x):
-        return x.quantile(0.99)
-
-
 class ParamQuantileData:
     """ 
-    Contains train and test data for certain parameter
+    Contains train and test data one parameter.
+    The four member variables are all np list having the shape (num_samples, seq_length, num_quantiles + n),
+    where n is the number of parameters in the template that the current parameter belongs to.
     """
 
     def __init__(self, X_train, X_test, Y_train, Y_test):
@@ -79,17 +46,12 @@ class ParamQuantileData:
         return self.X_train, self.X_test, self.Y_train, self.Y_test
 
 
-class QueryQuantileData:
-    """
-    Contains train/test data for all parameters
-    """
-
-    def __init__(self, query_template, all_param_quantile_data):
-        self.query_template = query_template
-        self.param_quantile_data = all_param_quantile_data
-
-
 class Network(nn.Module):
+    """
+    Simple LSTM model.
+    todo: add an embedding layer
+    """
+
     def __init__(self, input_size, output_size, hidden_size=HIDDEN_SIZE, num_layers=RNN_LAYERS):
         super(Network, self).__init__()
 
@@ -104,8 +66,6 @@ class Network(nn.Module):
         )
 
     def forward(self, x, hidden):
-        # output: (L, 1, 1 * H_out)
-
         if hidden is None:
             output, hidden = self.lstm(x)
         else:
@@ -128,19 +88,6 @@ class Forecaster:
         """
 
         # Quantiles to be used to generate training data
-        self.quantiles = [
-            QuantileMetadata.left_boundary,
-            QuantileMetadata.q1,
-            QuantileMetadata.q2,
-            QuantileMetadata.q3,
-            QuantileMetadata.q4,
-            QuantileMetadata.q5,
-            QuantileMetadata.q6,
-            QuantileMetadata.q7,
-            QuantileMetadata.q8,
-            QuantileMetadata.q9,
-            QuantileMetadata.right_boundary,
-        ]
         self.quantile_names = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 
         # Load DataPreprocessor class
@@ -210,7 +157,13 @@ class Forecaster:
                         continue
 
                     # Group by time and get quantile data
-                    time_series_df = template_df[col].resample(self.prediction_interval).agg(self.quantiles)
+                    # todo: should be fairly easy to tune the range in order to get more fine-grained distribution
+                    # note: should also decide if it is legitimate to use 0.01 and 0.99 as the left and right boundary
+                    func_quantiles = map(lambda y: lambda x: x.quantile(y), np.arange(.1, 1, .1))
+                    func_min = lambda x: x.quantile(.01)
+                    func_max = lambda x: x.quantile(.99)
+                    time_series_df = template_df[col].resample(self.prediction_interval)
+                    time_series_df = time_series_df.agg([func_min, *func_quantiles, func_max])
 
                     # note: add N columns to indicate which parameter current time series represents
                     for param_index in range(num_cols):
@@ -237,20 +190,20 @@ class Forecaster:
 
                     # note: Currently, the entire data set are used to train, this is not the correct way
                     # note: to do testing. We are doing this for now because we do not have enough data.
-                    _, X_test, _, Y_test = train_test_split(param_col_X, param_col_Y, shuffle=False, test_size=0.1)
-                    X_train = param_col_X
-                    Y_train = param_col_Y
+                    X_train, X_test, Y_train, Y_test = train_test_split(param_col_X, param_col_Y, shuffle=True,
+                                                                        test_size=0.1)
+                    X_train = np.concatenate((X_train, X_test))
+                    Y_train = np.concatenate((Y_train, Y_test))
 
                     param_quantile_timeseries.append(ParamQuantileData(X_train, X_test, Y_train, Y_test))
 
-                self.qt_to_param_quantile_timeseries[query_template] = QueryQuantileData(query_template, param_quantile_timeseries)
+                self.qt_to_param_quantile_timeseries[query_template] = param_quantile_timeseries
 
                 query_to_param_X[query_template] = param_X
                 query_to_param_Y[query_template] = param_Y
 
             self.qt_to_param_X = query_to_param_X
             self.qt_to_param_Y = query_to_param_Y
-
 
     def save_checkpoint(self, ckpt_path, filename, query_template, model, epoch, optimizer=None, scheduler=None):
         path = os.path.join(ckpt_path, f"{filename}")
@@ -270,7 +223,6 @@ class Forecaster:
             save_dict["scheduler_state"] = scheduler.state_dict()
 
         torch.save(save_dict, path)
-        # print(f"=> saved the model {filename} to {path}")
 
     def export_forecast_metadata(self):
         with open(qt_to_index_SAVE_PATH, "wb") as f:
@@ -302,60 +254,59 @@ class Forecaster:
     #########################           Model Training        #########################################
     ###################################################################################################
     def _train_epoch(self, model, X_train, Y_train, optimizer, scheduler, loss_function):
+        """
+        Train the LSTM for one epoch.
+        @param model: LSTM model
+        @param X_train: (N, seq_length, num_quantiles + n) values at time t
+        @param Y_train: (N, seq_length, num_quantiles + n) values at time t + 1
+        @param optimizer: optimizer
+        @param scheduler: scheduler
+        @param loss_function: loss_function
+        @return: train loss for one epoch
+        """
         model.train()
 
-        # Shuffle the timeseries
-        arr = np.arange(X_train.shape[1])
-        np.random.shuffle(arr)
+        seq = torch.tensor(X_train).to(device).float()
+        labels = torch.tensor(Y_train).to(device).float()
+        optimizer.zero_grad()
+        prediction, _ = model(seq, None)
 
-        train_loss = 0
-        batch_bar = tqdm(total=X_train.shape[1], dynamic_ncols=True, leave=False, position=0, desc="Train")
-        for ind in arr:
-            seq = torch.tensor(X_train[:, ind: ind + 1, :]).to(device).float()
-            labels = torch.tensor(Y_train[ind]).to(device).float()
-            optimizer.zero_grad()
-            y_pred = model(seq)
-            single_loss = loss_function(y_pred[-1, -1, :], labels)
-            single_loss.backward()
-            optimizer.step()
-            scheduler.step()
-            train_loss += float(single_loss)
+        assert (prediction.size() == labels.size())
+        loss = loss_function(prediction, labels)
 
-            batch_bar.set_postfix(
-                loss="{:.04f}".format(float(train_loss / (ind + 1))),
-                lr="{:.04f}".format(float(optimizer.param_groups[0]["lr"])),
-            )
+        loss.backward()
+        optimizer.step()
+        scheduler.step()
 
-            batch_bar.update()
-
-        train_loss /= X_train.shape[1]
-        batch_bar.close()
-        return train_loss
+        return loss
 
     def _validate(self, model, X_test, Y_test, loss_function):
-        # Validation loss
+        """
+
+        @param model: LSTM model
+        @param X_test: (N, seq_length, num_quantiles + n) values at time t
+        @param Y_test: (N, seq_length, num_quantiles + n) values at time t + 1
+        @param loss_function: loss_function
+        @return: validation loss
+        """
         model.eval()
-        val_loss = 0
-        batch_bar = tqdm(total=X_test.shape[1], dynamic_ncols=True, leave=False, position=0, desc="Validate")
-        for ind in range(X_test.shape[1]):
-            seq = torch.tensor(X_test[:, ind: ind + 1, :]).to(device).float()
-            labels = torch.tensor(Y_test[ind]).to(device).float()
 
-            with torch.no_grad():
-                y_pred = model(seq)
+        seq = torch.tensor(X_test).to(device).float()
+        labels = torch.tensor(Y_test).to(device).float()
 
-            single_loss = loss_function(y_pred[-1, -1, :], labels)
-            val_loss += float(single_loss)
-            batch_bar.update()
-        val_loss /= X_test.shape[1]
-        batch_bar.close()
-        return val_loss
+        with torch.no_grad():
+            prediction = model(seq, None)
+
+        assert (prediction.size() == labels.size())
+        loss = loss_function(prediction, labels)
+
+        return loss
 
     def _train_model(self):
         self.qt_to_index = {}
-        for template_index, (qt, query_quantile_data_obj) in enumerate(self.qt_to_param_quantile_timeseries.items()):
+        for template_index, (qt, param_quantile_data) in enumerate(self.qt_to_param_quantile_timeseries.items()):
             self.qt_to_index[qt] = template_index
-            for param_index, param_quantile_data_obj in enumerate(query_quantile_data_obj.param_quantile_data):
+            for param_index, param_quantile_data_obj in enumerate(param_quantile_data):
                 print(f"Training for Q{template_index}-P{param_index}...")
 
                 # Skip string param
@@ -364,8 +315,15 @@ class Forecaster:
 
                 X_train, X_test, Y_train, Y_test = param_quantile_data_obj.get_train_test_data()
 
-                model = Network(len(self.quantiles), len(self.quantiles), HIDDEN_SIZE, RNN_LAYERS).to(device)
+                # note: might need a better way to find the input and output size
+                _, _, input_size = X_train.shape
+                _, _, output_size = Y_train.shape
+
+                model = Network(input_size, output_size, HIDDEN_SIZE, RNN_LAYERS).to(device)
+
+                # todo: can try a different loss function
                 loss_function = nn.MSELoss()
+
                 optimizer = torch.optim.Adam(model.parameters(), lr=LR)
                 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=(X_train.shape[1] * EPOCHS))
 
@@ -373,13 +331,14 @@ class Forecaster:
                     train_loss = self._train_epoch(model, X_train, Y_train, optimizer, scheduler, loss_function)
                     val_loss = self._validate(model, X_test, Y_test, loss_function)
 
-                # print(f"[LSTM FIT]epoch: {epoch + 1:3}, train_loss: {train_loss:10.8f}, val_loss: {val_loss:10.8f}")
+                    print(f"[LSTM FIT]epoch: {epoch + 1:3}, train_loss: {train_loss:10.8f}, val_loss: {val_loss:10.8f}")
+
                 filename = f"{template_index}_{param_index}"
-                self.save_checkpoint(MODEL_SAVE_PATH, filename, qt, model, epoch)
+                self.save_checkpoint(MODEL_SAVE_PATH, filename, qt, model, EPOCHS)
 
     def fit(self, log_filename, file_type="parquet", dataframe=None, save_metadata=True):
         print("Preprocessing data...")
-        # self.data_preprocessor.preprocess(log_filename, file_type, dataframe)
+        self.data_preprocessor.preprocess(log_filename, file_type, dataframe)
         print("Preprocessing Done!")
         if save_metadata:
             self.data_preprocessor.save_to_file(PREPROCESSOR_SAVE_PATH)
@@ -513,7 +472,6 @@ class Forecaster:
                 plt.show()
                 print("\n")
 
-    # Get all parameters for a query and compare it with actual data
     def get_parameters_for(self, query_template, timestamp, num_queries):
         target_timestamp = pd.Timestamp(timestamp)
         template_normalized_df = self.data_preprocessor.qt_to_normalized_df[query_template]
@@ -581,6 +539,7 @@ class Forecaster:
                     conditions = [x <= pred[0]]
                     for k in range(pred.shape[0] - 1):
                         conditions.append(pred[k] <= x <= pred[k + 1])
+                    # todo: this is a potential source for inconsistency
                     choices = [quantile_name / 100 for quantile_name in self.quantile_names]
                     return np.select(conditions, choices, default=0)
 
@@ -607,7 +566,7 @@ if __name__ == "__main__":
     query_log_filename = "./preprocessed.parquet.gzip"
 
     forecaster = Forecaster(
-        pred_interval=pd.Timedelta("2S"), pred_seq_len=3, pred_horizon=pd.Timedelta("2S"), load_metadata=True
+        pred_interval=pd.Timedelta("2S"), pred_seq_len=3, pred_horizon=pd.Timedelta("2S"), load_metadata=False
     )
     forecaster.fit(query_log_filename)
 
