@@ -107,7 +107,7 @@ class Network(nn.Module):
 
     def forward(self, x):
         output, (h_n, c_n) = self.lstm(x)
-        # output: (L, 1 * H_out)
+        # output: (L, 1, 1 * H_out)
 
         out = self.classification(output)
         return out
@@ -117,6 +117,14 @@ class Forecaster:
     def __init__(
         self, pred_interval=pd.Timedelta("2S"), pred_seq_len=5, pred_horizon=pd.Timedelta("2S"), load_metadata=False
     ):
+        """
+        Initialize Forecaster class.
+
+        @param pred_interval:
+        @param pred_seq_len:
+        @param pred_horizon:
+        @param load_metadata:
+        """
 
         # Quantiles to be used to generate training data
         self.quantiles = [
@@ -140,6 +148,8 @@ class Forecaster:
                 self.data_preprocessor = pickle.load(f)
         else:
             self.data_preprocessor = DataPreprocessor(pred_interval, pred_seq_len, pred_horizon,)
+
+        # note: if the data is loaded from the pickle, the parameters should match
 
         # Prediction interval hyperparameters
         self.prediction_interval = pred_interval  # Each interval has two seconds
@@ -167,11 +177,11 @@ class Forecaster:
             # Y has shape (N, num_quantiles)
             query_to_param_X = {}
             query_to_param_Y = {}
-            for qt, tdfp in tqdm(self.data_preprocessor.qt_to_normalized_df.items()):
+            for query_template, tdfp in tqdm(self.data_preprocessor.qt_to_normalized_df.items()):
                 param_X = []
                 param_Y = []
 
-                dtypes = self.data_preprocessor.qt_to_dtype[qt]
+                dtypes = self.data_preprocessor.qt_to_dtype[query_template]
                 for j, col in enumerate(tdfp):
                     # Skip non-numerical columns
                     if dtypes[j] == "string":
@@ -203,8 +213,8 @@ class Forecaster:
                     param_X.append(param_col_X)
                     param_Y.append(param_col_Y)
 
-                query_to_param_X[qt] = param_X
-                query_to_param_Y[qt] = param_Y
+                query_to_param_X[query_template] = param_X
+                query_to_param_Y[query_template] = param_Y
             self.qt_to_param_X = query_to_param_X
             self.qt_to_param_Y = query_to_param_Y
 
@@ -365,6 +375,7 @@ class Forecaster:
                 X_train, X_test, Y_train, Y_test = param_quantile_data_obj.get_train_test_data()
 
                 model = Network(len(self.quantiles), len(self.quantiles), HIDDEN_SIZE, RNN_LAYERS).to(device)
+                # note: can probability use all 5 outputs, therefore a different loss function can be used
                 loss_function = nn.MSELoss()
                 optimizer = torch.optim.Adam(model.parameters(), lr=LR)
                 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=(X_train.shape[1] * EPOCHS))
@@ -442,6 +453,7 @@ class Forecaster:
                     pred = model(seq)
 
                 # Ensure prediction quantile values are strictly increasing
+                # (L, 1, 1 * H_out)
                 pred = pred[-1, -1, :]
                 pred = torch.cummax(pred, dim=0).values
 
@@ -555,6 +567,8 @@ class Forecaster:
                     pred = model(seq)
 
             # Ensure prediction quantile values are strictly increasing
+            # Todo: if embeddings are changed, this might need to change as well
+            # note: need some clarification on what this is doing
             pred = pred[-1, -1, :]
             pred = torch.cummax(pred, dim=0).values
 
@@ -575,6 +589,7 @@ class Forecaster:
         # Draw samples from the predicted distribution
         class Dist(stats.rv_continuous):
             def _cdf(self, x):
+                # note how is this conditions used
                 conditions = [x <= pred[0]]
                 for k in range(pred.shape[0] - 1):
                     conditions.append(pred[k] <= x <= pred[k + 1])

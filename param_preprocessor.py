@@ -1,102 +1,105 @@
-from sklearn.preprocessing import LabelEncoder
 from preprocessor import Preprocessor
-
-from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
-import numpy as np
 import joypy
-from ast import literal_eval
-from pandas.api.types import is_datetime64_any_dtype
 from tqdm import tqdm
-
 import warnings
 import pickle
 
-
 class DataPreprocessor:
-    def __init__(
-        self, pred_interval=pd.Timedelta("2S"), pred_seq_len=5, pred_horizon=pd.Timedelta("2S"),
-    ):
+    def __init__(self, pred_interval: pd.Timedelta = pd.Timedelta("2S"), seq_length: int = 5,
+                 pred_horizon: pd.Timedelta = pd.Timedelta("2S")):
+        """
+        Initialize the DataPreprocessor class with prediction interval, prediction length, and prediction horizon.
+
+        @param pred_interval: the granularity by which the data points are aggregated
+        @param seq_length: the length of the time series used to train the model
+        @param pred_horizon: how far into the future the model predicts (model predicts t + pred_horizon)
+        @precondition pred_interval should be equal to pred_horizon; otherwise, the prediction can be inaccurate
+        """
+
+        """
+        The following params_dataframe have the shape of (T, N) where T is the number of timestamps and 
+        N is the number of parameters. The column index is the timestamp and the row index is the parameter index.
+        """
         # {key=template, value=params_dataframe}
         self.qt_to_original_df = {}
         # {key=template, value=params_dataframe}
         self.qt_to_normalized_df = {}
+
         # {key=template, value=[p1_dtype, p2_dtype, ...]}
         self.qt_to_dtype = {}
         # {key=template, value=[(p1_mean, p1_var), (p2_mean, p2_var), ...]}
         self.qt_to_stats = {}
 
-        # Prediction interval hyperparameters
-        self.prediction_interval = pred_interval  # Each interval has two seconds
-        self.prediction_seq_len = pred_seq_len  # 5 data points
-        self.prediction_horizon = pred_horizon  # total time = interval * seq_len
+        self.prediction_interval = pred_interval    # Each interval has two seconds
+        self.sequence_length = seq_length           # 5 data points
+        self.prediction_horizon = pred_horizon      # total time = interval * seq_len
 
-    def _get_param_data(self, df):
-        """Generate a dictionary that maps a query template (qt) to a param
-        dataframe.
-        key=qt
-        value= | TS | p1 | p2 | p3 | ...
+        if pred_horizon != pred_interval:
+            print(f"Warning: Prediction horizon {pred_horizon} is not equal to {pred_interval}.")
 
-        Args:
-            df: query log dataframe
-            save: whether export the generated dictionaries to pickle file
+    def _get_param_data(self, query_df):
         """
-        with warnings.catch_warnings():
-            for index, (query_template, tdf) in enumerate(tqdm(df.groupby("query_template"))):
+        Generate directories that maps a query template to a dataframes and stats that contain parameter distributions.
 
-                # print(f"******************************************")
-                # print(index, query_template)
+        Each dataframe (template_series and normalized_template_series) has shape (T, N) where
+        T is the number of timestamps and N is the number of parameters for this template.
+
+        @param query_df: dataframe for all query template.
+        """
+
+        with warnings.catch_warnings():
+            for index, (query_template, template_df) in enumerate(tqdm(query_df.groupby("query_template"))):
 
                 # Skip query templates with no parameters ex. BEGIN
-                if tdf["query_params"][0] == ():
+                if template_df["query_params"][0] == ():
                     continue
 
                 # Extract param columns and strip off the quotation marks
-                tdfp = tdf["query_params"].apply(pd.Series)
-                tdfp = tdfp.apply(lambda col: col.str.strip("\"'"))
+                template_series = template_df["query_params"].apply(pd.Series)
+                template_series = template_series.apply(lambda col: col.str.strip("\"'"))
 
-                # Make a copy of tdfp to store normalized version
-                normalized_tdfp = tdfp.copy(deep=True)
+                # replace the NaN values with empty string
+                # note: this treatment might change the behavior in lines 72 - 85
+                template_series.dropna(axis=0)
+
 
                 dtypes = []
                 stats = []
-                for j, col in enumerate(tdfp):
-                    # TODO: if a column contains numerical values and NAN, then need
-                    # to fill the NAN values before doing this step.
+
+                # note: a bit awkward, but works for now
+                for j, col in enumerate(template_series):
                     try:
-                        tdfp[col] = pd.to_numeric(tdfp[col], errors="raise")
-                        normalized_tdfp[col] = pd.to_numeric(normalized_tdfp[col], errors="raise")
+                        template_series[col] = pd.to_numeric(template_series[col], errors="raise")
                         dtypes.append("numerical")
                     except:
                         try:
-                            tdfp[col] = pd.to_datetime(tdfp[col], errors="raise")
-                            normalized_tdfp[col] = pd.to_datetime(normalized_tdfp[col], errors="raise")
+                            template_series[col] = pd.to_datetime(template_series[col], errors="raise")
                             dtypes.append("date")
                         except:
-                            # TODO: Right now we drop non date/numerical columns. Want to handle string columns later
+                            # todo: string columns are not considered for now
                             dtypes.append("string")
-                            pass
 
-                    # Compute mean/var and standardize the column
-                    if dtypes[-1] != "string":
-                        # print(f"param {j}, {dtypes[-1]}")
-                        mean = tdfp[col].mean()
-                        std = tdfp[col].std()
-                        # print(mean, std)
-                        # print(tdfp[col])
+                # Make a copy of template_series to store normalized version
+                # note: it is unnecessary to make the copy, in fact it might not be necessary to standardize
+                normalized_template_series = template_series.copy(deep=True)
+                template_series = template_series.convert_dtypes()
+                for j, col in enumerate(normalized_template_series):
+                    if dtypes[j] != "string":
+                        mean = template_series[col].mean()
+                        std = template_series[col].std()
                         if std != 0:
-                            normalized_tdfp[col] = (normalized_tdfp[col] - mean) / std
+                            normalized_template_series[col] = (normalized_template_series[col] - mean) / std
                         else:
-                            normalized_tdfp[col] = normalized_tdfp[col] - mean
+                            normalized_template_series[col] = normalized_template_series[col] - mean
                         stats.append((mean, std))
                     else:
                         stats.append(None)
-                tdfp = tdfp.convert_dtypes()
 
-                # Store df, dtype, and stats for this template
-                self.qt_to_original_df[query_template] = tdfp
-                self.qt_to_normalized_df[query_template] = normalized_tdfp
+                # Store original and standardized dataframe, dtype, and stats for this template
+                self.qt_to_original_df[query_template] = template_series
+                self.qt_to_normalized_df[query_template] = normalized_template_series
                 self.qt_to_dtype[query_template] = dtypes
                 self.qt_to_stats[query_template] = stats
 
@@ -125,7 +128,7 @@ class DataPreprocessor:
                         grid=True,
                         x_range=[min_val, max_val],
                     )
-                    print(f"PARAM ${i+1}")
+                    print(f"PARAM ${i + 1}")
                     plt.show()
                 except:
                     pass
@@ -176,5 +179,5 @@ if __name__ == "__main__":
     with open("./data/data_preprocessor.pickle", "rb") as f:
         dp = pickle.load(f)
         dp.graph_query_template(0)
-    qts = list(dp.qt_to_original_df.keys())
-    print("query template:", qts[0])
+    query_templates = list(dp.qt_to_original_df.keys())
+    print("query template:", query_templates[0])
