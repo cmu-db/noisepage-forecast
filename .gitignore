@@ -39,4 +39,5 @@ parsed_admission/
 
 models/
 data/
+forecast/
 experiment.py
