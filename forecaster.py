@@ -74,6 +74,21 @@ class Network(nn.Module):
         return prediction, hidden
 
 
+# Draw samples from the predicted distribution
+class Dist(stats.rv_continuous):
+    def __init__(self, a, b, name, pred, quantiles):
+        super(Dist, self).__init__(a=a, b=b, name=name)
+        self.pred = pred
+        self.quantiles = quantiles
+
+    def _cdf(self, x):  # Rename self to self_dist so that self refers to outer class
+        conditions = [x <= self.pred[0]]
+        for k in range(self.pred.shape[0] - 1):
+            conditions.append(self.pred[k] <= x <= self.pred[k + 1])
+        choices = self.quantiles
+        return np.select(conditions, choices, default=0)
+
+
 class Forecaster:
     def __init__(
             self, pred_interval=pd.Timedelta("2S"), pred_seq_len=5, pred_horizon=pd.Timedelta("2S"),
@@ -87,8 +102,7 @@ class Forecaster:
         @param load_metadata:
         """
 
-        # Quantiles to be used to generate training data
-        self.quantile_names = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+        self.quantiles = np.concatenate(([.01], np.arange(.1, 1, .1), [.99]))
 
         # Load DataPreprocessor class
         if load_metadata:
@@ -108,6 +122,7 @@ class Forecaster:
         self.qt_to_param_Y = {}
         self.qt_to_param_quantile_timeseries = {}
         self.qt_to_index = {}
+        self.query_to_num_params = {}
 
         if load_metadata:
             self.load_forecast_metadata()
@@ -127,16 +142,6 @@ class Forecaster:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
 
-            # note: the dictionaries map a query template to X, data to be fed into the LSTM
-            # note: and Y, the ground truth for the prediction
-            # note: X and Y are both lists of matrices, the length of the lists are the number of parameters
-            # note: X and Y both have shape (N, seq_len, num_quantiles + n)
-            # note: where N is the number of samples, seq_len is the number of data points fed into the LSTM
-            # note: at a time, num_quantiles is the number of quantiles defining the distribution,
-            # note: and n is the number of parameters for the parameter
-            query_to_param_X = {}
-            query_to_param_Y = {}
-
             # note: each template_df is in the shape of (T, N)
             # note: where T is the number of timestamps and N is the number of parameters
             for query_template, template_df in tqdm(self.data_preprocessor.qt_to_normalized_df.items()):
@@ -146,6 +151,8 @@ class Forecaster:
 
                 dtypes = self.data_preprocessor.qt_to_dtype[query_template]
                 num_cols = len(template_df.columns)
+
+                self.query_to_num_params[query_template] = num_cols
 
                 param_quantile_timeseries = []
 
@@ -159,11 +166,9 @@ class Forecaster:
                     # Group by time and get quantile data
                     # todo: should be fairly easy to tune the range in order to get more fine-grained distribution
                     # note: should also decide if it is legitimate to use 0.01 and 0.99 as the left and right boundary
-                    func_quantiles = map(lambda y: lambda x: x.quantile(y), np.arange(.1, 1, .1))
-                    func_min = lambda x: x.quantile(.01)
-                    func_max = lambda x: x.quantile(.99)
+                    func_quantiles = map(lambda y: lambda x: x.quantile(y), self.quantiles)
                     time_series_df = template_df[col].resample(self.prediction_interval)
-                    time_series_df = time_series_df.agg([func_min, *func_quantiles, func_max])
+                    time_series_df = time_series_df.agg(*func_quantiles)
 
                     # note: add N columns to indicate which parameter current time series represents
                     for param_index in range(num_cols):
@@ -199,11 +204,15 @@ class Forecaster:
 
                 self.qt_to_param_quantile_timeseries[query_template] = param_quantile_timeseries
 
-                query_to_param_X[query_template] = param_X
-                query_to_param_Y[query_template] = param_Y
-
-            self.qt_to_param_X = query_to_param_X
-            self.qt_to_param_Y = query_to_param_Y
+                # note: the dictionaries map a query template to X, data to be fed into the LSTM
+                # note: and Y, the ground truth for the prediction
+                # note: X and Y are both lists of matrices, the length of the lists are the number of parameters
+                # note: X and Y both have shape (N, seq_len, num_quantiles + n)
+                # note: where N is the number of samples, seq_len is the number of data points fed into the LSTM
+                # note: at a time, num_quantiles is the number of quantiles defining the distribution,
+                # note: and n is the number of parameters for the parameter
+                self.qt_to_param_X[query_template] = param_X
+                self.qt_to_param_Y[query_template] = param_Y
 
     def save_checkpoint(self, ckpt_path, filename, query_template, model, epoch, optimizer=None, scheduler=None):
         path = os.path.join(ckpt_path, f"{filename}")
@@ -305,36 +314,40 @@ class Forecaster:
     def _train_model(self):
         self.qt_to_index = {}
         for template_index, (qt, param_quantile_data) in enumerate(self.qt_to_param_quantile_timeseries.items()):
+            print(f"Training for Q{template_index}...")
+
             self.qt_to_index[qt] = template_index
-            for param_index, param_quantile_data_obj in enumerate(param_quantile_data):
-                print(f"Training for Q{template_index}-P{param_index}...")
 
-                # Skip string param
-                if param_quantile_data_obj == None:
-                    continue
+            num_parameters = self.query_to_num_params[template_index]
+            output_size = len(self.quantiles)
+            input_size = output_size + num_parameters
+            model = Network(input_size, output_size, HIDDEN_SIZE, RNN_LAYERS).to(device)
 
-                X_train, X_test, Y_train, Y_test = param_quantile_data_obj.get_train_test_data()
+            for epoch in range(EPOCHS):
+                avg_train_loss = avg_val_loss = 0
+                for param_index, param_quantile_data_obj in enumerate(param_quantile_data):
 
-                # note: might need a better way to find the input and output size
-                _, _, input_size = X_train.shape
-                _, _, output_size = Y_train.shape
+                    # Skip string param
+                    if param_quantile_data_obj == None:
+                        continue
 
-                model = Network(input_size, output_size, HIDDEN_SIZE, RNN_LAYERS).to(device)
+                    X_train, X_test, Y_train, Y_test = param_quantile_data_obj.get_train_test_data()
 
-                # todo: can try a different loss function
-                loss_function = nn.MSELoss()
+                    # todo: can try a different loss function
+                    loss_function = nn.MSELoss()
 
-                optimizer = torch.optim.Adam(model.parameters(), lr=LR)
-                scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=(X_train.shape[1] * EPOCHS))
+                    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+                    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=(X_train.shape[1] * EPOCHS))
 
-                for epoch in range(EPOCHS):
-                    train_loss = self._train_epoch(model, X_train, Y_train, optimizer, scheduler, loss_function)
-                    val_loss = self._validate(model, X_test, Y_test, loss_function)
+                    avg_train_loss += self._train_epoch(model, X_train, Y_train, optimizer, scheduler, loss_function)
+                    avg_val_loss += self._validate(model, X_test, Y_test, loss_function)
 
-                    print(f"[LSTM FIT]epoch: {epoch + 1:3}, train_loss: {train_loss:10.8f}, val_loss: {val_loss:10.8f}")
+                avg_train_loss /= num_parameters
+                avg_val_loss /= num_parameters
+                print(f"epoch: {epoch + 1:3}, train_loss: {avg_train_loss:10.8f}, val_loss: {avg_val_loss:10.8f}")
 
-                filename = f"{template_index}_{param_index}"
-                self.save_checkpoint(MODEL_SAVE_PATH, filename, qt, model, EPOCHS)
+            filename = f"{template_index}"
+            self.save_checkpoint(MODEL_SAVE_PATH, filename, qt, model, EPOCHS)
 
     def fit(self, log_filename, file_type="parquet", dataframe=None, save_metadata=True):
         print("Preprocessing data...")
@@ -347,10 +360,10 @@ class Forecaster:
         self.generate_time_series_data()
         print("Data generation done!")
 
-        # self._train_model()
+        self._train_model()
 
-        # if save_metadata:
-        #     self.export_forecast_metadata()
+        if save_metadata:
+            self.export_forecast_metadata()
 
     # Get all parameters for a query and compare it with actual data
     def get_all_parameters_for(self, query_template: str):
@@ -483,11 +496,17 @@ class Forecaster:
         param_X = self.qt_to_param_X[query_template]
         param_Y = self.qt_to_param_Y[query_template]
 
-        # todo: there is probably a better way to get the shapes
-        _, _, input_size = param_X[0].shape
-        _, _, output_size = param_Y[0].shape
-
         num_params = len(template_dtypes)
+
+        # todo: there is probably a better way to get the shapes
+        output_size = len(self.quantiles)
+        input_size = output_size + num_params
+
+        # Get corresponding model
+        model = Network(input_size, output_size, HIDDEN_SIZE, RNN_LAYERS)
+        filepath = os.path.join(MODEL_SAVE_PATH, f"{template_index}")
+        state_dict = torch.load(filepath)
+        model.load_state_dict(state_dict["model_state"])
 
         generated_params = []
 
@@ -495,12 +514,6 @@ class Forecaster:
             if template_dtypes[i] == "string":
                 print("Skipping string columns")
                 continue
-
-            # Get corresponding model
-            model = Network(input_size, output_size, HIDDEN_SIZE, RNN_LAYERS)
-            filepath = os.path.join(MODEL_SAVE_PATH, f"{template_index}_{i}")
-            state_dict = torch.load(filepath)
-            model.load_state_dict(state_dict["model_state"])
 
             # Compute how many predictions need to be made
             start_timestamp = template_normalized_df.index.max()
@@ -536,27 +549,14 @@ class Forecaster:
             else:
                 pred = pred + mean
 
-            # Draw samples from the predicted distribution
-            class Dist(stats.rv_continuous):
-                def _cdf(self_dist, x):  # Rename self to self_dist so that self refers to outer class
-                    conditions = [x <= pred[0]]
-                    for k in range(pred.shape[0] - 1):
-                        conditions.append(pred[k] <= x <= pred[k + 1])
-                    # todo: this is a potential source for inconsistency if the quantile description changes
-                    choices = [quantile_name / 100 for quantile_name in self.quantile_names]
-                    return np.select(conditions, choices, default=0)
-
-            dist = Dist(a=pred[0], b=pred[-1], name="deterministic")
-            # Model takes in sequence data until time j and ouputs prediction value for time j+1.
-            # Therefore we need the number of queries in thej+1's interval
-            # num_templates = int(num_template_df[j+1]/10) # Divide by 10 so it runs faster
-            # num_params = 30 # Generate 30 parameter values for this specific parameter
+            dist = Dist(a=pred[0], b=pred[-1], name="deterministic", pred=pred, quantiles=self.quantiles)
             generated_param_ith = []
+
             try:
                 for _ in range(num_queries):
                     generated_param_ith.append(dist.rvs())
             except:
-                # If all predicted quantiles have the same value, then a continous cdf cannot be constructed.
+                # If all predicted quantiles have the same value, then a continuous cdf cannot be constructed.
                 # Just take any predicted quantile value as the prediction.
                 for _ in range(num_queries):
                     generated_param_ith.append(pred[0])
