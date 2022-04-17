@@ -536,7 +536,7 @@ class Forecaster:
                     seq[:, :, output_size + i] = 1
 
             # only care about the prediction for the last step
-            pred = seq[-1, -1, :]
+            pred = seq.view(-1)[:-num_params]
 
             # Ensure prediction quantile values are strictly increasing
             pred = torch.cummax(pred, dim=0).values
