@@ -27,7 +27,7 @@ qt_to_param_X_SAVE_PATH = "./data/qt_to_param_X.pickle"
 qt_to_param_Y_SAVE_PATH = "./data/qt_to_param_Y.pickle"
 qt_to_param_quantile_timeseries_SAVE_PATH = "./data/qt_to_param_quantile_timeseries.pickle"
 qt_to_index_SAVE_PATH = "./data/qt_to_index.pickle"
-
+qt_to_num_params_SAVE_PATH = "./data/qt_to_num_params.pickle"
 
 class ParamQuantileData:
     """ 
@@ -168,7 +168,7 @@ class Forecaster:
                     # note: should also decide if it is legitimate to use 0.01 and 0.99 as the left and right boundary
                     func_quantiles = map(lambda y: lambda x: x.quantile(y), self.quantiles)
                     time_series_df = template_df[col].resample(self.prediction_interval)
-                    time_series_df = time_series_df.agg(*func_quantiles)
+                    time_series_df = time_series_df.agg(func_quantiles)
 
                     # note: add N columns to indicate which parameter current time series represents
                     for param_index in range(num_cols):
@@ -246,6 +246,9 @@ class Forecaster:
         with open(qt_to_param_Y_SAVE_PATH, "wb") as f:
             pickle.dump(self.qt_to_param_Y, f)
 
+        with open(qt_to_num_params_SAVE_PATH, "wb") as f:
+            pickle.dump(self.query_to_num_params, f)
+
     def load_forecast_metadata(self):
         with open(qt_to_index_SAVE_PATH, "rb") as f:
             self.qt_to_index = pickle.load(f)
@@ -258,6 +261,9 @@ class Forecaster:
 
         with open(qt_to_param_Y_SAVE_PATH, "rb") as f:
             self.qt_to_param_Y = pickle.load(f)
+
+        with open(qt_to_num_params_SAVE_PATH, "rb") as f:
+            self.query_to_num_params = pickle.load(f)
 
     ###################################################################################################
     #########################           Model Training        #########################################
@@ -304,7 +310,7 @@ class Forecaster:
         labels = torch.tensor(Y_test).to(device).float()
 
         with torch.no_grad():
-            prediction = model(seq, None)
+            prediction, _ = model(seq, None)
 
         assert (prediction.size() == labels.size())
         loss = loss_function(prediction, labels)
@@ -318,7 +324,7 @@ class Forecaster:
 
             self.qt_to_index[qt] = template_index
 
-            num_parameters = self.query_to_num_params[template_index]
+            num_parameters = self.query_to_num_params[qt]
             output_size = len(self.quantiles)
             input_size = output_size + num_parameters
             model = Network(input_size, output_size, HIDDEN_SIZE, RNN_LAYERS).to(device)
@@ -487,16 +493,13 @@ class Forecaster:
 
     def get_parameters_for(self, query_template, timestamp, num_queries):
         target_timestamp = pd.Timestamp(timestamp)
+
         template_normalized_df = self.data_preprocessor.qt_to_normalized_df[query_template]
         template_dtypes = self.data_preprocessor.qt_to_dtype[query_template]
         template_stats = self.data_preprocessor.qt_to_stats[query_template]
-
         template_index = self.qt_to_index[query_template]
-
         param_X = self.qt_to_param_X[query_template]
-        param_Y = self.qt_to_param_Y[query_template]
-
-        num_params = len(template_dtypes)
+        num_params = self.query_to_num_params[query_template]
 
         # todo: there is probably a better way to get the shapes
         output_size = len(self.quantiles)
@@ -529,10 +532,8 @@ class Forecaster:
                 # Get predicted quantiles from the model
                 with torch.no_grad():
                     seq, hidden = model(seq, hidden)
-                    shape = seq.size()
-                    shape[-1] = num_params
-                    seq = torch.cat((seq, torch.zeros(shape)))
-                    seq[:, :, i] = 1
+                    seq = nn.functional.pad(seq, (0, num_params, 0, 0, 0, 0))
+                    seq[:, :, output_size + i] = 1
 
             # only care about the prediction for the last step
             pred = seq[-1, -1, :]
@@ -568,10 +569,10 @@ class Forecaster:
 if __name__ == "__main__":
     query_log_filename = "./preprocessed.parquet.gzip"
 
-    forecaster = Forecaster(
-        pred_interval=pd.Timedelta("2S"), pred_seq_len=3, pred_horizon=pd.Timedelta("2S"), load_metadata=False
-    )
-    forecaster.fit(query_log_filename)
+    # forecaster = Forecaster(
+    #     pred_interval=pd.Timedelta("2S"), pred_seq_len=3, pred_horizon=pd.Timedelta("2S"), load_metadata=False
+    # )
+    # forecaster.fit(query_log_filename)
 
     forecaster = Forecaster(
         pred_interval=pd.Timedelta("2S"), pred_seq_len=3, pred_horizon=pd.Timedelta("2S"), load_metadata=True
