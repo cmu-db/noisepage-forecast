@@ -6,28 +6,15 @@ import pandas as pd
 from scipy import stats
 import joypy
 import matplotlib.pyplot as plt
+import constants as K
 import pickle
 import os
 import warnings
 from param_preprocessor import DataPreprocessor
 from sklearn.model_selection import train_test_split
 
-# LSTM config
-HIDDEN_SIZE = 128
-RNN_LAYERS = 2
-EPOCHS = 50
-LR = 1e-4
-
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Constants
-PREPROCESSOR_SAVE_PATH = "./data/data_preprocessor.pickle"
-MODEL_SAVE_PATH = "./models/1m1t/"
-qt_to_param_X_SAVE_PATH = "./data/qt_to_param_X.pickle"
-qt_to_param_Y_SAVE_PATH = "./data/qt_to_param_Y.pickle"
-qt_to_param_quantile_timeseries_SAVE_PATH = "./data/qt_to_param_quantile_timeseries.pickle"
-qt_to_index_SAVE_PATH = "./data/qt_to_index.pickle"
-qt_to_num_params_SAVE_PATH = "./data/qt_to_num_params.pickle"
 
 class ParamQuantileData:
     """ 
@@ -52,7 +39,7 @@ class Network(nn.Module):
     todo: add an embedding layer
     """
 
-    def __init__(self, input_size, output_size, hidden_size=HIDDEN_SIZE, num_layers=RNN_LAYERS):
+    def __init__(self, input_size, output_size, hidden_size=K.HIDDEN_SIZE, num_layers=K.RNN_LAYERS):
         super(Network, self).__init__()
 
         self.lstm = nn.LSTM(
@@ -74,14 +61,15 @@ class Network(nn.Module):
         return prediction, hidden
 
 
-# Draw samples from the predicted distribution
+# note: this method of sampling is most likely broken.
+# note: it currently generates the same number multiple times
 class Dist(stats.rv_continuous):
     def __init__(self, a, b, name, pred, quantiles):
         super(Dist, self).__init__(a=a, b=b, name=name)
         self.pred = pred
         self.quantiles = quantiles
 
-    def _cdf(self, x):  # Rename self to self_dist so that self refers to outer class
+    def _cdf(self, x):
         conditions = [x <= self.pred[0]]
         for k in range(self.pred.shape[0] - 1):
             conditions.append(self.pred[k] <= x <= self.pred[k + 1])
@@ -96,17 +84,17 @@ class Forecaster:
         """
         Initialize Forecaster class.
 
-        @param pred_interval:
-        @param pred_seq_len:
-        @param pred_horizon:
-        @param load_metadata:
+        @param pred_interval: the granularity by which the data points are aggregated
+        @param pred_seq_len: the length of the time series used to train the model
+        @param pred_horizon: how far into the future the model predicts (model predicts t + pred_horizon)
+        @param load_metadata: whether to load data from pickle
         """
 
         self.quantiles = np.arange(.01, 1, .01)
 
         # Load DataPreprocessor class
         if load_metadata:
-            with open(PREPROCESSOR_SAVE_PATH, "rb") as f:
+            with open(K.PREPROCESSOR_SAVE_PATH, "rb") as f:
                 self.data_preprocessor = pickle.load(f)
         else:
             self.data_preprocessor = DataPreprocessor(pred_interval, pred_seq_len, pred_horizon)
@@ -233,36 +221,37 @@ class Forecaster:
 
         torch.save(save_dict, path)
 
+    # todo: need to refactor this so that the entire class is saved to one file
     def export_forecast_metadata(self):
-        with open(qt_to_index_SAVE_PATH, "wb") as f:
+        with open(K.qt_to_index_SAVE_PATH, "wb") as f:
             pickle.dump(self.qt_to_index, f)
 
-        with open(qt_to_param_quantile_timeseries_SAVE_PATH, "wb") as f:
+        with open(K.qt_to_param_quantile_timeseries_SAVE_PATH, "wb") as f:
             pickle.dump(self.qt_to_param_quantile_timeseries, f)
 
-        with open(qt_to_param_X_SAVE_PATH, "wb") as f:
+        with open(K.qt_to_param_X_SAVE_PATH, "wb") as f:
             pickle.dump(self.qt_to_param_X, f)
 
-        with open(qt_to_param_Y_SAVE_PATH, "wb") as f:
+        with open(K.qt_to_param_Y_SAVE_PATH, "wb") as f:
             pickle.dump(self.qt_to_param_Y, f)
 
-        with open(qt_to_num_params_SAVE_PATH, "wb") as f:
+        with open(K.qt_to_num_params_SAVE_PATH, "wb") as f:
             pickle.dump(self.query_to_num_params, f)
 
     def load_forecast_metadata(self):
-        with open(qt_to_index_SAVE_PATH, "rb") as f:
+        with open(K.qt_to_index_SAVE_PATH, "rb") as f:
             self.qt_to_index = pickle.load(f)
 
-        with open(qt_to_param_quantile_timeseries_SAVE_PATH, "rb") as f:
+        with open(K.qt_to_param_quantile_timeseries_SAVE_PATH, "rb") as f:
             self.qt_to_param_quantile_timeseries = pickle.load(f)
 
-        with open(qt_to_param_X_SAVE_PATH, "rb") as f:
+        with open(K.qt_to_param_X_SAVE_PATH, "rb") as f:
             self.qt_to_param_X = pickle.load(f)
 
-        with open(qt_to_param_Y_SAVE_PATH, "rb") as f:
+        with open(K.qt_to_param_Y_SAVE_PATH, "rb") as f:
             self.qt_to_param_Y = pickle.load(f)
 
-        with open(qt_to_num_params_SAVE_PATH, "rb") as f:
+        with open(K.qt_to_num_params_SAVE_PATH, "rb") as f:
             self.query_to_num_params = pickle.load(f)
 
     ###################################################################################################
@@ -327,9 +316,9 @@ class Forecaster:
             num_parameters = self.query_to_num_params[qt]
             output_size = len(self.quantiles)
             input_size = output_size + num_parameters
-            model = Network(input_size, output_size, HIDDEN_SIZE, RNN_LAYERS).to(device)
+            model = Network(input_size, output_size, K.HIDDEN_SIZE, K.RNN_LAYERS).to(device)
 
-            for epoch in range(EPOCHS):
+            for epoch in range(K.EPOCHS):
                 avg_train_loss = avg_val_loss = 0
                 for param_index, param_quantile_data_obj in enumerate(param_quantile_data):
 
@@ -342,8 +331,8 @@ class Forecaster:
                     # todo: can try a different loss function
                     loss_function = nn.MSELoss()
 
-                    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
-                    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=(X_train.shape[1] * EPOCHS))
+                    optimizer = torch.optim.Adam(model.parameters(), lr=K.LR)
+                    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=(X_train.shape[1] * K.EPOCHS))
 
                     avg_train_loss += self._train_epoch(model, X_train, Y_train, optimizer, scheduler, loss_function)
                     avg_val_loss += self._validate(model, X_test, Y_test, loss_function)
@@ -353,14 +342,14 @@ class Forecaster:
                 print(f"epoch: {epoch + 1:3}, train_loss: {avg_train_loss:10.8f}, val_loss: {avg_val_loss:10.8f}")
 
             filename = f"{template_index}"
-            self.save_checkpoint(MODEL_SAVE_PATH, filename, qt, model, EPOCHS)
+            self.save_checkpoint(K.MODEL_SAVE_PATH, filename, qt, model, K.EPOCHS)
 
     def fit(self, log_filename, file_type="parquet", dataframe=None, save_metadata=True):
         print("Preprocessing data...")
         self.data_preprocessor.preprocess(log_filename, file_type, dataframe)
         print("Preprocessing Done!")
         if save_metadata:
-            self.data_preprocessor.save_to_file(PREPROCESSOR_SAVE_PATH)
+            self.data_preprocessor.save_to_file(K.PREPROCESSOR_SAVE_PATH)
 
         print("Generating training data...")
         self.generate_time_series_data()
@@ -372,6 +361,7 @@ class Forecaster:
             self.export_forecast_metadata()
 
     # Get all parameters for a query and compare it with actual data
+    # todo: either remove this function or adopt it to the new way of autoregressive generation
     def get_all_parameters_for(self, query_template: str):
         template_original_df = self.data_preprocessor.qt_to_original_df[query_template]
         template_normalized_df = self.data_preprocessor.qt_to_normalized_df[query_template]
@@ -386,8 +376,8 @@ class Forecaster:
                 continue
 
             # Get corresponding model
-            model = Network(len(self.quantiles), len(self.quantiles), HIDDEN_SIZE, RNN_LAYERS)
-            filepath = os.path.join(MODEL_SAVE_PATH, f"{template_index}_{i}")
+            model = Network(len(self.quantiles), len(self.quantiles), K.HIDDEN_SIZE, K.RNN_LAYERS)
+            filepath = os.path.join(K.MODEL_SAVE_PATH, f"{template_index}_{i}")
             state_dict = torch.load(filepath)
             model.load_state_dict(state_dict["model_state"])
 
@@ -491,6 +481,13 @@ class Forecaster:
                 plt.show()
                 print("\n")
 
+    def sample_one_value(self, prediction):
+        num_choices = len(self.quantiles) - 1
+        random_interval = np.random.randint(0, num_choices)
+        left, right = prediction[random_interval], prediction[random_interval + 1]
+        random_value = np.random.uniform(left, right)
+        return random_value
+
     def get_parameters_for(self, query_template, timestamp, num_queries):
         target_timestamp = pd.Timestamp(timestamp)
 
@@ -506,8 +503,8 @@ class Forecaster:
         input_size = output_size + num_params
 
         # Get corresponding model
-        model = Network(input_size, output_size, HIDDEN_SIZE, RNN_LAYERS)
-        filepath = os.path.join(MODEL_SAVE_PATH, f"{template_index}")
+        model = Network(input_size, output_size, K.HIDDEN_SIZE, K.RNN_LAYERS)
+        filepath = os.path.join(K.MODEL_SAVE_PATH, f"{template_index}")
         state_dict = torch.load(filepath)
         model.load_state_dict(state_dict["model_state"])
 
@@ -550,17 +547,8 @@ class Forecaster:
             else:
                 pred = pred + mean
 
-            dist = Dist(a=pred[0], b=pred[-1], name="deterministic", pred=pred, quantiles=self.quantiles)
-            generated_param_ith = []
-
-            try:
-                for _ in range(num_queries):
-                    generated_param_ith.append(dist.rvs())
-            except:
-                # If all predicted quantiles have the same value, then a continuous cdf cannot be constructed.
-                # Just take any predicted quantile value as the prediction.
-                for _ in range(num_queries):
-                    generated_param_ith.append(pred[0])
+            random_intervals = np.random.randint(0, len(self.quantiles) - 1, num_queries)
+            generated_param_ith = [np.random.uniform(pred[loc], pred[loc + 1]) for loc in random_intervals]
 
             generated_params.append(generated_param_ith)
         return generated_params
@@ -569,10 +557,10 @@ class Forecaster:
 if __name__ == "__main__":
     query_log_filename = "./preprocessed.parquet.gzip"
 
-    forecaster = Forecaster(
-        pred_interval=pd.Timedelta("2S"), pred_seq_len=3, pred_horizon=pd.Timedelta("2S"), load_metadata=False
-    )
-    forecaster.fit(query_log_filename)
+    # forecaster = Forecaster(
+    #     pred_interval=pd.Timedelta("2S"), pred_seq_len=3, pred_horizon=pd.Timedelta("2S"), load_metadata=False
+    # )
+    # forecaster.fit(query_log_filename)
 
     forecaster = Forecaster(
         pred_interval=pd.Timedelta("2S"), pred_seq_len=3, pred_horizon=pd.Timedelta("2S"), load_metadata=True

@@ -35,3 +35,17 @@ PG_LOG_DTYPES = {
     "query_id": "Int64",
 }
 
+# model hyper parameters
+HIDDEN_SIZE = 128
+RNN_LAYERS = 2
+EPOCHS = 50
+LR = 1e-4
+
+# File path constants
+PREPROCESSOR_SAVE_PATH = "./data/data_preprocessor.pickle"
+MODEL_SAVE_PATH = "./models/1m1t/"
+qt_to_param_X_SAVE_PATH = "./data/qt_to_param_X.pickle"
+qt_to_param_Y_SAVE_PATH = "./data/qt_to_param_Y.pickle"
+qt_to_param_quantile_timeseries_SAVE_PATH = "./data/qt_to_param_quantile_timeseries.pickle"
+qt_to_index_SAVE_PATH = "./data/qt_to_index.pickle"
+qt_to_num_params_SAVE_PATH = "./data/qt_to_num_params.pickle"
