@@ -102,7 +102,7 @@ class Forecaster:
         @param load_metadata:
         """
 
-        self.quantiles = np.concatenate(([.01], np.arange(.1, 1, .1), [.99]))
+        self.quantiles = np.arange(.01, 1, .01)
 
         # Load DataPreprocessor class
         if load_metadata:
@@ -569,10 +569,10 @@ class Forecaster:
 if __name__ == "__main__":
     query_log_filename = "./preprocessed.parquet.gzip"
 
-    # forecaster = Forecaster(
-    #     pred_interval=pd.Timedelta("2S"), pred_seq_len=3, pred_horizon=pd.Timedelta("2S"), load_metadata=False
-    # )
-    # forecaster.fit(query_log_filename)
+    forecaster = Forecaster(
+        pred_interval=pd.Timedelta("2S"), pred_seq_len=3, pred_horizon=pd.Timedelta("2S"), load_metadata=False
+    )
+    forecaster.fit(query_log_filename)
 
     forecaster = Forecaster(
         pred_interval=pd.Timedelta("2S"), pred_seq_len=3, pred_horizon=pd.Timedelta("2S"), load_metadata=True
