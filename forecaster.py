@@ -547,6 +547,7 @@ class Forecaster:
             else:
                 pred = pred + mean
 
+            # note: this assumes that the quantiles are evenly divided
             random_intervals = np.random.randint(0, len(self.quantiles) - 1, num_queries)
             generated_param_ith = [np.random.uniform(pred[loc], pred[loc + 1]) for loc in random_intervals]
 
@@ -557,10 +558,10 @@ class Forecaster:
 if __name__ == "__main__":
     query_log_filename = "./preprocessed.parquet.gzip"
 
-    # forecaster = Forecaster(
-    #     pred_interval=pd.Timedelta("2S"), pred_seq_len=3, pred_horizon=pd.Timedelta("2S"), load_metadata=False
-    # )
-    # forecaster.fit(query_log_filename)
+    forecaster = Forecaster(
+        pred_interval=pd.Timedelta("2S"), pred_seq_len=3, pred_horizon=pd.Timedelta("2S"), load_metadata=False
+    )
+    forecaster.fit(query_log_filename)
 
     forecaster = Forecaster(
         pred_interval=pd.Timedelta("2S"), pred_seq_len=3, pred_horizon=pd.Timedelta("2S"), load_metadata=True
