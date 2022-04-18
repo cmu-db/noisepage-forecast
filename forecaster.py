@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import pickle
 import os
 import warnings
+import random
 
 from param_preprocessor import DataPreprocessor
 
@@ -421,7 +422,8 @@ class Forecaster:
             # display(time_series_df.head(10))
 
             # Build a new dataframe whichcontains predicted parameters for all timestamps
-            generated_params = []
+            generated_params = np.array([])
+            num_queries_each_bin = 10
             timestamps = []
             for j in tqdm(range(len(time_series_df) - 1)):
                 # Generate sequence data. Add padding if neccesary
@@ -454,61 +456,70 @@ class Forecaster:
                 else:
                     pred = pred + mean
 
-                class Dist(stats.rv_continuous):
-                    def _cdf(self, x):
-                        conditions = [x <= pred[0]]
-                        for k in range(pred.shape[0] - 1):
-                            conditions.append(pred[k] <= x <= pred[k + 1])
-                        choices = [quantile_name / 100 for quantile_name in self.quantile_names]
-                        return np.select(conditions, choices, default=0)
-
-                dist = Dist(a=pred[0], b=pred[-1], name="deterministic")
-                # Model takes in sequence data until time j and ouputs prediction value for time j+1.
-                # Therefore we need the number of queries in thej+1's interval
-                # num_templates = int(num_template_df[j+1]/10) # Divide by 10 so it runs faster
-                num_params = 30  # Generate 30 parameter values for this specific parameter
-
-                try:
-                    for _ in range(num_params):
-                        generated_params.append(int(dist.rvs()))
-                        timestamps.append(num_template_df.index[j + 1])
-                except:
-                    # If all predicted quantiles have the same value, then a continous cdf cannot be constructed.
-                    # Just take any predicted quantile value as the prediction.
-                    for _ in range(num_params):
-                        generated_params.append(pred[0])
+                # Draw (0.1*num_queries) samples from each bin of the predicted quantile
+                for k in range(len(pred) - 1):
+                    a, b = pred[k], pred[k + 1]
+                    generated_params = np.concatenate(
+                        [generated_params, np.random.uniform(a, b, num_queries_each_bin)]
+                    )
+                    for _ in range(num_queries_each_bin):
                         timestamps.append(num_template_df.index[j + 1])
 
-                # Generate a dataframe for the predicted parameter values
-                predicted_params_df = pd.DataFrame(generated_params, index=pd.DatetimeIndex(timestamps))
+                # class Dist(stats.rv_continuous):
+                #     def _cdf(self, x):
+                #         conditions = [x <= pred[0]]
+                #         for k in range(pred.shape[0] - 1):
+                #             conditions.append(pred[k] <= x <= pred[k + 1])
+                #         choices = [quantile_name / 100 for quantile_name in self.quantile_names]
+                #         return np.select(conditions, choices, default=0)
 
-                # Graph the results
-                min_val, max_val = template_original_df[col].min(), template_original_df[col].max()
-                min_val = min_val - (1 + 0.2 * (max_val - min_val))
-                max_val = max_val + (1 + 0.2 * (max_val - min_val))
+                # dist = Dist(a=pred[0], b=pred[-1], name="deterministic")
+                # # Model takes in sequence data until time j and ouputs prediction value for time j+1.
+                # # Therefore we need the number of queries in thej+1's interval
+                # # num_templates = int(num_template_df[j+1]/10) # Divide by 10 so it runs faster
+                # num_params = 30  # Generate 30 parameter values for this specific parameter
 
-                print(f"PARAM ${i+1} Predicted")
-                fig, axes = joypy.joyplot(
-                    predicted_params_df.groupby(pd.Grouper(freq="5s")),
-                    hist=True,
-                    bins=20,
-                    overlap=0,
-                    grid=True,
-                    x_range=[min_val, max_val],
-                )
-                plt.show()
+                # try:
+                #     for _ in range(num_params):
+                #         generated_params.append(int(dist.rvs()))
+                #         timestamps.append(num_template_df.index[j + 1])
+                # except:
+                #     # If all predicted quantiles have the same value, then a continous cdf cannot be constructed.
+                #     # Just take any predicted quantile value as the prediction.
+                #     for _ in range(num_params):
+                #         generated_params.append(pred[0])
+                #         timestamps.append(num_template_df.index[j + 1])
 
-                print(f"PARAM ${i+1} Actual")
-                fig, axes2 = joypy.joyplot(
-                    template_original_df[col].to_frame().groupby(pd.Grouper(freq="5s")),
-                    hist=True,
-                    bins=20,
-                    overlap=0,
-                    grid=True,
-                    x_range=[min_val, max_val],
-                )
-                plt.show()
-                print("\n")
+            # Generate a dataframe for the predicted parameter values
+            predicted_params_df = pd.DataFrame(generated_params, index=pd.DatetimeIndex(timestamps))
+
+            # Graph the results
+            min_val, max_val = template_original_df[col].min(), template_original_df[col].max()
+            min_val = min_val - (1 + 0.2 * (max_val - min_val))
+            max_val = max_val + (1 + 0.2 * (max_val - min_val))
+
+            print(f"PARAM ${i+1} Predicted")
+            fig, axes = joypy.joyplot(
+                predicted_params_df.groupby(pd.Grouper(freq="5s")),
+                hist=True,
+                bins=20,
+                overlap=0,
+                grid=True,
+                x_range=[min_val, max_val],
+            )
+            plt.show()
+
+            print(f"PARAM ${i+1} Actual")
+            fig, axes2 = joypy.joyplot(
+                template_original_df[col].to_frame().groupby(pd.Grouper(freq="5s")),
+                hist=True,
+                bins=20,
+                overlap=0,
+                grid=True,
+                x_range=[min_val, max_val],
+            )
+            plt.show()
+            print("\n")
 
     # Get all parameters for a query and compare it with actual data
     def get_parameters_for(self, query_template, timestamp, num_queries):
@@ -520,7 +531,10 @@ class Forecaster:
         param_X = self.qt_to_param_X[query_template]
         num_params = len(template_dtypes)
 
-        generated_params = []
+        # Draw (0.1*num_queries) samples from each bin of the predicted quantile
+        generated_params = np.array([])
+        num_queries_each_bin = int(num_queries / (len(self.quantiles) - 1))
+        num_queries_last_bin = num_queries % (len(self.quantiles) - 1)  # Left over items in last bin
 
         for i in range(num_params):
             if template_dtypes[i] == "string":
@@ -566,32 +580,40 @@ class Forecaster:
             else:
                 pred = pred + mean
 
-            # Draw samples from the predicted distribution
+            # Draw (0.1*num_queries) samples from each bin of the predicted quantile
+            for k in range(len(pred) - 1):
+                a, b = pred[k], pred[k + 1]
+                if j == len(pred) - 2:
+                    generated_params = np.concatenate(
+                        [generated_params, np.random.uniform(a, b, num_queries_last_bin)]
+                    )
+                else:
+                    generated_params = np.concatenate(
+                        [generated_params, np.random.uniform(a, b, num_queries_each_bin)]
+                    )
 
-            class Dist(stats.rv_continuous):
-                def _cdf(self_dist, x):  # Rename self to self_dist so that self refers to outer class
-                    conditions = [x <= pred[0]]
-                    for k in range(pred.shape[0] - 1):
-                        conditions.append(pred[k] <= x <= pred[k + 1])
-                    choices = [quantile_name / 100 for quantile_name in self.quantile_names]
-                    return np.select(conditions, choices, default=0)
+            # class Dist(stats.rv_continuous):
+            #     def _cdf(self_dist, x):  # Rename self to self_dist so that self refers to outer class
+            #         conditions = [x <= pred[0]]
+            #         for k in range(pred.shape[0] - 1):
+            #             conditions.append(pred[k] <= x <= pred[k + 1])
+            #         choices = [quantile_name / 100 for quantile_name in self.quantile_names]
+            #         return np.select(conditions, choices, default=0)
 
-            dist = Dist(a=pred[0], b=pred[-1], name="deterministic")
-            # Model takes in sequence data until time j and ouputs prediction value for time j+1.
-            # Therefore we need the number of queries in thej+1's interval
-            # num_templates = int(num_template_df[j+1]/10) # Divide by 10 so it runs faster
-            # num_params = 30 # Generate 30 parameter values for this specific parameter
-            generated_param_ith = []
-            try:
-                for _ in range(num_queries):
-                    generated_param_ith.append(dist.rvs())
-            except:
-                # If all predicted quantiles have the same value, then a continous cdf cannot be constructed.
-                # Just take any predicted quantile value as the prediction.
-                for _ in range(num_queries):
-                    generated_param_ith.append(pred[0])
+            # dist = Dist(a=pred[0], b=pred[-1], name="deterministic")
+            # # Model takes in sequence data until time j and ouputs prediction value for time j+1.
+            # # Therefore we need the number of queries in the j+1's interval
+            # generated_param_ith = []
+            # try:
+            #     for _ in range(num_queries):
+            #         generated_param_ith.append(dist.rvs())
+            # except:
+            #     # If all predicted quantiles have the same value, then a continous cdf cannot be constructed.
+            #     # Just take any predicted quantile value as the prediction.
+            #     for _ in range(num_queries):
+            #         generated_param_ith.append(pred[0])
 
-            generated_params.append(generated_param_ith)
+            # generated_params.append(generated_param_ith)
         return generated_params
 
 
@@ -609,7 +631,9 @@ if __name__ == "__main__":
     pred_result = forecaster.get_parameters_for(
         "DELETE FROM new_order WHERE NO_O_ID = $1 AND NO_D_ID = $2 AND NO_W_ID = $3",
         "2022-03-08 11:30:06.021000-0500",
-        10,
+        30,
     )
-    print(pred_result)
+    with np.printoptions(precision=3, suppress=True):
+        print(pred_result)
+    # forecaster.get_all_parameters_for("DELETE FROM new_order WHERE NO_O_ID = $1 AND NO_D_ID = $2 AND NO_W_ID = $3")
 
